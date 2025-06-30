@@ -1,0 +1,118 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: whatsapp-webhook
+  namespace: whatsapp-webhook
+  labels:
+    app: whatsapp-webhook
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: whatsapp-webhook
+  template:
+    metadata:
+      labels:
+        app: whatsapp-webhook
+    spec:
+      containers:
+      - name: whatsapp-webhook
+        image: python:3.11-slim
+        ports:
+        - containerPort: 5000
+        env:
+        - name: WEBHOOK_VERIFY_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: whatsapp-webhook-secret
+              key: WEBHOOK_VERIFY_TOKEN
+        - name: DEBUG
+          value: "False"
+        - name: HOST
+          value: "0.0.0.0"
+        - name: PORT
+          value: "5000"
+        - name: LOG_LEVEL
+          value: "INFO"
+        - name: USE_SSL
+          value: "False"
+        - name: DB_HOST
+          value: "168.75.106.98"
+        - name: DB_PORT
+          value: "6446"
+        - name: DB_NAME
+          value: "atendimento"
+        - name: DB_USER
+          value: "atendimento"
+        - name: DB_PASSWORD
+          value: "8/vLQv98vCmw%Ox1"
+        - name: DB_ENABLED
+          value: "True"
+        volumeMounts:
+        - name: app-config
+          mountPath: /app/app.py
+          subPath: app.py
+        - name: app-config
+          mountPath: /app/config.py
+          subPath: config.py
+        - name: app-config
+          mountPath: /app/database.py
+          subPath: database.py
+        - name: app-config
+          mountPath: /app/requirements.txt
+          subPath: requirements.txt
+        - name: frontend-config
+          mountPath: /app/frontend/index.html
+          subPath: index.html
+        workingDir: /app
+        command: ["/bin/bash"]
+        args:
+        - -c
+        - |
+          if [ ! -f /tmp/dependencies_installed ]; then
+            pip install --no-cache-dir -r requirements.txt
+            touch /tmp/dependencies_installed
+          fi
+          python app.py
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 5000
+          initialDelaySeconds: 120
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 5000
+          initialDelaySeconds: 60
+          periodSeconds: 15
+          timeoutSeconds: 5
+          failureThreshold: 5
+      volumes:
+      - name: app-config
+        configMap:
+          name: whatsapp-webhook-config
+          items:
+          - key: app.py
+            path: app.py
+          - key: config.py
+            path: config.py
+          - key: database.py
+            path: database.py
+          - key: requirements.txt
+            path: requirements.txt
+      - name: frontend-config
+        configMap:
+          name: whatsapp-webhook-config
+          items:
+          - key: index.html
+            path: index.html 

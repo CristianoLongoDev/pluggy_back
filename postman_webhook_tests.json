@@ -1,0 +1,191 @@
+{
+  "info": {
+    "name": "WhatsApp Webhook Tests",
+    "description": "Coleção de testes para o webhook do WhatsApp Business API",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "https://atendimento.pluggerbi.com",
+      "type": "string"
+    },
+    {
+      "key": "local_url",
+      "value": "http://localhost:5000",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Health Check",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/health",
+          "host": ["{{base_url}}"],
+          "path": ["health"]
+        }
+      }
+    },
+    {
+      "name": "Webhook Verification (GET)",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/webhook?hub.mode=subscribe&hub.verify_token=seu_token_de_verificacao_aqui&hub.challenge=test_challenge_123",
+          "host": ["{{base_url}}"],
+          "path": ["webhook"],
+          "query": [
+            {
+              "key": "hub.mode",
+              "value": "subscribe"
+            },
+            {
+              "key": "hub.verify_token",
+              "value": "seu_token_de_verificacao_aqui"
+            },
+            {
+              "key": "hub.challenge",
+              "value": "test_challenge_123"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "Webhook - Mensagem de Texto (POST)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"object\": \"whatsapp_business_account\",\n  \"entry\": [\n    {\n      \"id\": \"123456789\",\n      \"changes\": [\n        {\n          \"value\": {\n            \"messaging_product\": \"whatsapp\",\n            \"metadata\": {\n              \"display_phone_number\": \"5511999999999\",\n              \"phone_number_id\": \"987654321\"\n            },\n            \"contacts\": [\n              {\n                \"profile\": {\n                  \"name\": \"João Silva\"\n                },\n                \"wa_id\": \"5511888888888\"\n              }\n            ],\n            \"messages\": [\n              {\n                \"from\": \"5511888888888\",\n                \"id\": \"wamid.123456789\",\n                \"timestamp\": \"1751289207\",\n                \"text\": {\n                  \"body\": \"Olá! Esta é uma mensagem de teste via Postman.\"\n                },\n                \"type\": \"text\"\n              }\n            ]\n          },\n          \"field\": \"messages\"\n        }\n      ]\n    }\n  ]\n}"
+        },
+        "url": {
+          "raw": "{{base_url}}/webhook",
+          "host": ["{{base_url}}"],
+          "path": ["webhook"]
+        }
+      }
+    },
+    {
+      "name": "Webhook - Status de Entrega (POST)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"object\": \"whatsapp_business_account\",\n  \"entry\": [\n    {\n      \"id\": \"123456789\",\n      \"changes\": [\n        {\n          \"value\": {\n            \"messaging_product\": \"whatsapp\",\n            \"metadata\": {\n              \"display_phone_number\": \"5511999999999\",\n              \"phone_number_id\": \"987654321\"\n            },\n            \"statuses\": [\n              {\n                \"id\": \"wamid.123456789\",\n                \"status\": \"delivered\",\n                \"timestamp\": \"1751289209\",\n                \"recipient_id\": \"5511888888888\"\n              }\n            ]\n          },\n          \"field\": \"messages\"\n        }\n      ]\n    }\n  ]\n}"
+        },
+        "url": {
+          "raw": "{{base_url}}/webhook",
+          "host": ["{{base_url}}"],
+          "path": ["webhook"]
+        }
+      }
+    },
+    {
+      "name": "Webhook - Mensagem de Imagem (POST)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"object\": \"whatsapp_business_account\",\n  \"entry\": [\n    {\n      \"id\": \"123456789\",\n      \"changes\": [\n        {\n          \"value\": {\n            \"messaging_product\": \"whatsapp\",\n            \"metadata\": {\n              \"display_phone_number\": \"5511999999999\",\n              \"phone_number_id\": \"987654321\"\n            },\n            \"contacts\": [\n              {\n                \"profile\": {\n                  \"name\": \"Maria Santos\"\n                },\n                \"wa_id\": \"5511777777777\"\n              }\n            ],\n            \"messages\": [\n              {\n                \"from\": \"5511777777777\",\n                \"id\": \"wamid.987654321\",\n                \"timestamp\": \"1751289210\",\n                \"image\": {\n                  \"id\": \"img_123456789\",\n                  \"mime_type\": \"image/jpeg\",\n                  \"sha256\": \"abc123...\",\n                  \"caption\": \"Foto de teste\"\n                },\n                \"type\": \"image\"\n              }\n            ]\n          },\n          \"field\": \"messages\"\n        }\n      ]\n    }\n  ]\n}"
+        },
+        "url": {
+          "raw": "{{base_url}}/webhook",
+          "host": ["{{base_url}}"],
+          "path": ["webhook"]
+        }
+      }
+    },
+    {
+      "name": "Webhook - Payload Inválido (POST)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"invalid_object\": \"test\",\n  \"data\": \"test data\",\n  \"timestamp\": \"2025-06-30T10:30:00Z\"\n}"
+        },
+        "url": {
+          "raw": "{{base_url}}/webhook",
+          "host": ["{{base_url}}"],
+          "path": ["webhook"]
+        }
+      }
+    },
+    {
+      "name": "Verificar Logs - Todos",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/logs",
+          "host": ["{{base_url}}"],
+          "path": ["logs"]
+        }
+      }
+    },
+    {
+      "name": "Verificar Logs - Mensagens",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/logs/message_received",
+          "host": ["{{base_url}}"],
+          "path": ["logs", "message_received"]
+        }
+      }
+    },
+    {
+      "name": "Verificar Logs - Status",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/logs/status_update",
+          "host": ["{{base_url}}"],
+          "path": ["logs", "status_update"]
+        }
+      }
+    },
+    {
+      "name": "API Info",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api",
+          "host": ["{{base_url}}"],
+          "path": ["api"]
+        }
+      }
+    }
+  ]
+} 
