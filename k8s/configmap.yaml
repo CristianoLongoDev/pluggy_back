@@ -14,9 +14,11 @@ data:
     from config import (
         WEBHOOK_VERIFY_TOKEN, DEBUG, HOST, PORT, LOG_LEVEL, 
         SSL_CERT_PATH, SSL_KEY_PATH, USE_SSL,
-        DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD, DB_ENABLED
+        DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD, DB_ENABLED,
+        RABBITMQ_ENABLED, RABBITMQ_HOST, RABBITMQ_PORT
     )
     from database import db_manager
+    from rabbitmq_manager import rabbitmq_manager
     from datetime import datetime
     import traceback
     import time
@@ -53,7 +55,8 @@ data:
             "message": "HELLO WORLD",
             "status": "success",
             "endpoint": "/api",
-            "database_status": db_manager.get_connection_status()
+            "database_status": db_manager.get_connection_status(),
+            "rabbitmq_status": rabbitmq_manager.get_status()
         })
     
     @app.route('/health')
@@ -66,7 +69,8 @@ data:
                 'message': 'API está funcionando!',
                 'timestamp': datetime.now().isoformat(),
                 'version': '1.0.0',
-                'database': 'unknown'
+                'database': 'unknown',
+                'rabbitmq': 'unknown'
             }
             
             # Verificar conexão com banco (opcional, não falha se não conseguir)
@@ -85,8 +89,18 @@ data:
             else:
                 health_status['database'] = 'disabled'
             
+            # Verificar RabbitMQ (opcional, não falha se não conseguir)
+            if rabbitmq_manager.enabled:
+                try:
+                    rabbitmq_status = rabbitmq_manager.get_status()
+                    health_status['rabbitmq'] = rabbitmq_status.get('status', 'unknown')
+                except Exception as e:
+                    health_status['rabbitmq'] = f'error: {str(e)}'
+            else:
+                health_status['rabbitmq'] = 'disabled'
+            
             # Log da verificação de saúde
-            logger.info(f"Health check realizado: {health_status['status']}, DB: {health_status['database']}")
+            logger.info(f"Health check realizado: {health_status['status']}, DB: {health_status['database']}, RabbitMQ: {health_status['rabbitmq']}")
             
             return jsonify(health_status), 200
             
@@ -169,6 +183,19 @@ data:
             logger.error(f"Erro ao buscar logs por tipo: {str(e)}")
             return jsonify({"error": str(e)}), 500
     
+    @app.route('/rabbitmq/status')
+    def rabbitmq_status():
+        """Endpoint para verificar status do RabbitMQ e suas filas"""
+        try:
+            status = rabbitmq_manager.get_status()
+            return jsonify(status)
+        except Exception as e:
+            logger.error(f"Erro ao obter status do RabbitMQ: {e}")
+            return jsonify({
+                'status': 'error',
+                'error': str(e)
+            }), 500
+    
     @app.route('/webhook', methods=['GET'])
     def verify_webhook():
         """
@@ -216,7 +243,21 @@ data:
             
             logger.info(f"Webhook recebido: {json.dumps(body, indent=2)}")
             
-            # Tentativa de salvar evento no banco (não crítico)
+            # PRIORITÁRIO: Salvar no RabbitMQ (garante que não perde mensagem)
+            rabbitmq_saved = False
+            try:
+                if rabbitmq_manager and rabbitmq_manager.enabled:
+                    rabbitmq_saved = rabbitmq_manager.publish_webhook_event('webhook_received', body)
+                    if rabbitmq_saved:
+                        logger.info("✅ Evento salvo no RabbitMQ com sucesso")
+                    else:
+                        logger.warning("⚠️ Falha ao salvar evento no RabbitMQ")
+                else:
+                    logger.debug("RabbitMQ desabilitado - evento não salvo na fila")
+            except Exception as rabbitmq_error:
+                logger.error(f"❌ Erro crítico ao salvar no RabbitMQ: {rabbitmq_error}")
+            
+            # SECUNDÁRIO: Tentativa de salvar evento no banco (não crítico)
             try:
                 if db_manager and db_manager.enabled:
                     db_manager.save_webhook_event('webhook_received', body)
@@ -300,7 +341,14 @@ data:
         try:
             logger.info(f"Processando mensagem: {json.dumps(message, indent=2)}")
             
-            # Tentativa de salvar mensagem no banco (não crítico)
+            # PRIORITÁRIO: Salvar no RabbitMQ
+            try:
+                if rabbitmq_manager and rabbitmq_manager.enabled:
+                    rabbitmq_manager.publish_webhook_event('message_received', message)
+            except Exception as rabbitmq_error:
+                logger.warning(f"Falha ao salvar mensagem no RabbitMQ: {rabbitmq_error}")
+            
+            # SECUNDÁRIO: Tentativa de salvar mensagem no banco (não crítico)
             try:
                 if db_manager and db_manager.enabled:
                     db_manager.save_webhook_event('message_received', message)
@@ -327,7 +375,14 @@ data:
         try:
             logger.info(f"Processando status: {json.dumps(status, indent=2)}")
             
-            # Tentativa de salvar status no banco (não crítico)
+            # PRIORITÁRIO: Salvar no RabbitMQ
+            try:
+                if rabbitmq_manager and rabbitmq_manager.enabled:
+                    rabbitmq_manager.publish_webhook_event('status_update', status)
+            except Exception as rabbitmq_error:
+                logger.warning(f"Falha ao salvar status no RabbitMQ: {rabbitmq_error}")
+            
+            # SECUNDÁRIO: Tentativa de salvar status no banco (não crítico)
             try:
                 if db_manager and db_manager.enabled:
                     db_manager.save_webhook_event('status_update', status)
@@ -388,6 +443,22 @@ data:
                 logger.info("A aplicação continuará funcionando, mas os logs não serão salvos")
         else:
             logger.info("📊 Banco de dados desabilitado")
+        
+        # Tentar conectar ao RabbitMQ
+        if rabbitmq_manager.enabled:
+            logger.info("🐰 Tentando conectar ao RabbitMQ...")
+            logger.info(f"RabbitMQ Config: {RABBITMQ_HOST}:{RABBITMQ_PORT}")
+            
+            rabbitmq_connected = rabbitmq_manager.connect()
+            
+            if rabbitmq_connected:
+                logger.info("✅ Conectado ao RabbitMQ com sucesso!")
+                logger.info("📬 Filas declaradas e prontas para uso")
+            else:
+                logger.warning("⚠️ Não foi possível conectar ao RabbitMQ na inicialização")
+                logger.info("A aplicação continuará funcionando, mas sem mensageria")
+        else:
+            logger.info("🐰 RabbitMQ desabilitado")
         
         # Iniciar servidor Flask
         logger.info(f"🌐 Iniciando servidor Flask em {HOST}:{PORT}")
@@ -702,14 +773,533 @@ data:
     DB_ENABLED = os.getenv('DB_ENABLED', 'True').lower() == 'true'
     
     # Configurações de logging
-    LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO') 
+    LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
+    
+    # Configurações do RabbitMQ
+    RABBITMQ_HOST = os.getenv('RABBITMQ_HOST', 'rabbitmq-service.whatsapp-webhook.svc.cluster.local')
+    RABBITMQ_PORT = int(os.getenv('RABBITMQ_PORT', 5672))
+    RABBITMQ_USER = os.getenv('RABBITMQ_USER', 'admin')
+    RABBITMQ_PASSWORD = os.getenv('RABBITMQ_PASSWORD', 'rabbitmq123')
+    RABBITMQ_ENABLED = os.getenv('RABBITMQ_ENABLED', 'True').lower() == 'true'
+    
+    # Configurações das filas RabbitMQ
+    WEBHOOK_QUEUE = 'webhook_messages'
+    MESSAGE_QUEUE = 'processed_messages'
+    STATUS_QUEUE = 'status_updates'
+    ERROR_QUEUE = 'error_messages' 
+  rabbitmq_manager.py: |
+    import pika
+    import json
+    import logging
+    import threading
+    import time
+    from typing import Optional, Dict, Any, Callable
+    from config import (
+        RABBITMQ_HOST, RABBITMQ_PORT, RABBITMQ_USER, RABBITMQ_PASSWORD, RABBITMQ_ENABLED,
+        WEBHOOK_QUEUE, MESSAGE_QUEUE, STATUS_QUEUE, ERROR_QUEUE
+    )
+    
+    logger = logging.getLogger(__name__)
+    
+    class RabbitMQManager:
+        def __init__(self):
+            self.connection = None
+            self.channel = None
+            self.enabled = RABBITMQ_ENABLED
+            self._lock = threading.Lock()
+            self.queues = [WEBHOOK_QUEUE, MESSAGE_QUEUE, STATUS_QUEUE, ERROR_QUEUE]
+            
+        def _get_connection_params(self):
+            """Retorna os parâmetros de conexão do RabbitMQ"""
+            return pika.ConnectionParameters(
+                host=RABBITMQ_HOST,
+                port=RABBITMQ_PORT,
+                credentials=pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASSWORD),
+                heartbeat=600,
+                blocked_connection_timeout=300
+            )
+        
+        def connect(self, max_retries=3):
+            """Estabelece conexão com o RabbitMQ"""
+            if not self.enabled:
+                logger.info("RabbitMQ desabilitado")
+                return False
+                
+            with self._lock:
+                try:
+                    # Fechar conexão existente se houver
+                    self.disconnect()
+                    
+                    # Criar nova conexão
+                    params = self._get_connection_params()
+                    self.connection = pika.BlockingConnection(params)
+                    self.channel = self.connection.channel()
+                    
+                    # Declarar filas
+                    self._declare_queues()
+                    
+                    logger.info("✅ Conectado ao RabbitMQ com sucesso")
+                    return True
+                    
+                except Exception as e:
+                    logger.error(f"❌ Erro ao conectar ao RabbitMQ: {e}")
+                    self.connection = None
+                    self.channel = None
+                    return False
+        
+        def _declare_queues(self):
+            """Declara todas as filas necessárias"""
+            try:
+                for queue_name in self.queues:
+                    self.channel.queue_declare(
+                        queue=queue_name,
+                        durable=True  # Fila persistente
+                    )
+                    logger.info(f"📝 Fila '{queue_name}' declarada")
+            except Exception as e:
+                logger.error(f"❌ Erro ao declarar filas: {e}")
+                raise
+        
+        def disconnect(self):
+            """Fecha a conexão com o RabbitMQ"""
+            try:
+                if self.channel and not self.channel.is_closed:
+                    self.channel.close()
+                if self.connection and not self.connection.is_closed:
+                    self.connection.close()
+                logger.info("🔌 Conexão RabbitMQ fechada")
+            except Exception as e:
+                logger.error(f"❌ Erro ao fechar conexão RabbitMQ: {e}")
+            finally:
+                self.channel = None
+                self.connection = None
+        
+        def _ensure_connection(self):
+            """Garante que há uma conexão ativa"""
+            if not self.enabled:
+                return False
+                
+            try:
+                # Verifica se a conexão está ativa
+                if (self.connection and not self.connection.is_closed and 
+                    self.channel and not self.channel.is_closed):
+                    return True
+                
+                # Reconecta se necessário
+                logger.info("🔄 Reconectando ao RabbitMQ...")
+                return self.connect()
+                
+            except Exception as e:
+                logger.error(f"❌ Erro ao verificar conexão RabbitMQ: {e}")
+                return False
+        
+        def publish_message(self, queue_name: str, message: Dict[Any, Any], 
+                           routing_key: str = None) -> bool:
+            """Publica uma mensagem na fila especificada"""
+            if not self.enabled:
+                logger.warning("⚠️ RabbitMQ desabilitado - mensagem não enviada")
+                return False
+                
+            with self._lock:
+                try:
+                    if not self._ensure_connection():
+                        logger.error("❌ Não foi possível conectar ao RabbitMQ")
+                        return False
+                    
+                    # Preparar mensagem
+                    message_body = json.dumps(message, ensure_ascii=False)
+                    
+                    # Publicar mensagem
+                    self.channel.basic_publish(
+                        exchange='',
+                        routing_key=routing_key or queue_name,
+                        body=message_body,
+                        properties=pika.BasicProperties(
+                            delivery_mode=2,  # Mensagem persistente
+                            timestamp=int(time.time()),
+                            content_type='application/json'
+                        )
+                    )
+                    
+                    logger.info(f"📤 Mensagem enviada para fila '{queue_name}'")
+                    return True
+                    
+                except Exception as e:
+                    logger.error(f"❌ Erro ao publicar mensagem: {e}")
+                    # Tentar reconectar para próxima tentativa
+                    try:
+                        self.disconnect()
+                    except:
+                        pass
+                    return False
+        
+        def publish_webhook_event(self, event_type: str, event_data: Dict[Any, Any]) -> bool:
+            """Publica um evento do webhook na fila apropriada"""
+            message = {
+                'event_type': event_type,
+                'event_data': event_data,
+                'timestamp': time.time(),
+                'processed': False
+            }
+            
+            # Escolher fila baseada no tipo de evento
+            if event_type in ['message_received']:
+                queue = MESSAGE_QUEUE
+            elif event_type in ['status_update']:
+                queue = STATUS_QUEUE
+            elif event_type in ['webhook_error', 'webhook_critical_error']:
+                queue = ERROR_QUEUE
+            else:
+                queue = WEBHOOK_QUEUE
+                
+            return self.publish_message(queue, message)
+        
+        def consume_messages(self, queue_name: str, callback: Callable, 
+                            auto_ack: bool = False) -> bool:
+            """Consome mensagens de uma fila específica"""
+            if not self.enabled:
+                logger.warning("⚠️ RabbitMQ desabilitado - não é possível consumir")
+                return False
+                
+            try:
+                if not self._ensure_connection():
+                    logger.error("❌ Não foi possível conectar ao RabbitMQ para consumir")
+                    return False
+                
+                def wrapper_callback(ch, method, properties, body):
+                    try:
+                        # Decodificar mensagem
+                        message = json.loads(body.decode('utf-8'))
+                        
+                        # Chamar callback do usuário
+                        result = callback(message)
+                        
+                        # Confirmar processamento se auto_ack for False
+                        if not auto_ack:
+                            if result:
+                                ch.basic_ack(delivery_tag=method.delivery_tag)
+                                logger.info(f"✅ Mensagem processada com sucesso da fila '{queue_name}'")
+                            else:
+                                ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
+                                logger.warning(f"⚠️ Mensagem rejeitada e recolocada na fila '{queue_name}'")
+                        
+                    except Exception as e:
+                        logger.error(f"❌ Erro ao processar mensagem da fila '{queue_name}': {e}")
+                        if not auto_ack:
+                            ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
+                
+                # Configurar consumidor
+                self.channel.basic_qos(prefetch_count=1)  # Processar uma mensagem por vez
+                self.channel.basic_consume(
+                    queue=queue_name,
+                    on_message_callback=wrapper_callback,
+                    auto_ack=auto_ack
+                )
+                
+                logger.info(f"🎧 Iniciando consumo da fila '{queue_name}'...")
+                self.channel.start_consuming()
+                
+                return True
+                
+            except KeyboardInterrupt:
+                logger.info("⏹️ Consumo interrompido pelo usuário")
+                self.channel.stop_consuming()
+                return True
+            except Exception as e:
+                logger.error(f"❌ Erro ao consumir mensagens da fila '{queue_name}': {e}")
+                return False
+        
+        def get_queue_info(self, queue_name: str) -> Optional[Dict[str, Any]]:
+            """Retorna informações sobre uma fila"""
+            try:
+                if not self._ensure_connection():
+                    return None
+                    
+                method = self.channel.queue_declare(queue=queue_name, passive=True)
+                return {
+                    'queue': queue_name,
+                    'message_count': method.method.message_count,
+                    'consumer_count': method.method.consumer_count
+                }
+            except Exception as e:
+                logger.error(f"❌ Erro ao obter informações da fila '{queue_name}': {e}")
+                return None
+        
+        def get_status(self) -> Dict[str, Any]:
+            """Retorna o status do RabbitMQ e suas filas"""
+            if not self.enabled:
+                return {'status': 'disabled'}
+                
+            try:
+                if not self._ensure_connection():
+                    return {'status': 'disconnected'}
+                
+                status = {
+                    'status': 'connected',
+                    'host': RABBITMQ_HOST,
+                    'port': RABBITMQ_PORT,
+                    'queues': {}
+                }
+                
+                for queue_name in self.queues:
+                    queue_info = self.get_queue_info(queue_name)
+                    if queue_info:
+                        status['queues'][queue_name] = queue_info
+                        
+                return status
+                
+            except Exception as e:
+                logger.error(f"❌ Erro ao obter status do RabbitMQ: {e}")
+                return {'status': 'error', 'error': str(e)}
+    
+    # Instância global do gerenciador RabbitMQ
+    rabbitmq_manager = RabbitMQManager() 
+  webhook_worker.py: |
+    #!/usr/bin/env python3
+    """
+    Worker para processar mensagens do webhook via RabbitMQ
+    Este worker consome mensagens das filas e processa de forma assíncrona
+    """
+    
+    import json
+    import logging
+    import os
+    import signal
+    import sys
+    import time
+    from datetime import datetime
+    from config import (
+        WEBHOOK_QUEUE, MESSAGE_QUEUE, STATUS_QUEUE, ERROR_QUEUE,
+        LOG_LEVEL, RABBITMQ_ENABLED
+    )
+    from rabbitmq_manager import rabbitmq_manager
+    from database import db_manager
+    
+    # Configurar logging
+    logging.basicConfig(
+        level=getattr(logging, LOG_LEVEL),
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.StreamHandler(),
+            logging.FileHandler('/tmp/webhook_worker.log')
+        ]
+    )
+    logger = logging.getLogger(__name__)
+    
+    class WebhookWorker:
+        def __init__(self):
+            self.running = True
+            self.processed_count = 0
+            self.error_count = 0
+            
+            # Configurar handler para interrupção
+            signal.signal(signal.SIGINT, self._signal_handler)
+            signal.signal(signal.SIGTERM, self._signal_handler)
+        
+        def _signal_handler(self, signum, frame):
+            """Handler para sinais de interrupção"""
+            logger.info(f"📡 Sinal {signum} recebido. Parando worker...")
+            self.running = False
+            if rabbitmq_manager.channel:
+                rabbitmq_manager.channel.stop_consuming()
+        
+        def process_webhook_message(self, message):
+            """Processa uma mensagem genérica do webhook"""
+            try:
+                event_type = message.get('event_type', 'unknown')
+                event_data = message.get('event_data', {})
+                timestamp = message.get('timestamp', time.time())
+                
+                logger.info(f"📨 Processando evento: {event_type}")
+                
+                # Salvar no banco de dados se disponível
+                if db_manager.enabled:
+                    success = db_manager.save_webhook_event(event_type, event_data)
+                    if success:
+                        logger.info(f"💾 Evento {event_type} salvo no banco")
+                    else:
+                        logger.warning(f"⚠️ Falha ao salvar evento {event_type} no banco")
+                
+                # Processar lógica específica baseada no tipo
+                if event_type == 'webhook_received':
+                    self._process_webhook_received(event_data)
+                elif event_type == 'message_received':
+                    self._process_message_received(event_data)
+                elif event_type == 'status_update':
+                    self._process_status_update(event_data)
+                elif 'error' in event_type:
+                    self._process_error(event_data)
+                
+                self.processed_count += 1
+                logger.info(f"✅ Evento processado com sucesso. Total: {self.processed_count}")
+                return True
+                
+            except Exception as e:
+                logger.error(f"❌ Erro ao processar mensagem: {e}")
+                self.error_count += 1
+                return False
+        
+        def _process_webhook_received(self, event_data):
+            """Processa webhook completo recebido"""
+            logger.info("🔄 Processando webhook completo...")
+            
+            # Verificar se é evento do WhatsApp
+            if event_data.get('object') == 'whatsapp_business_account':
+                entries = event_data.get('entry', [])
+                logger.info(f"📬 Webhook contém {len(entries)} entradas")
+                
+                for entry in entries:
+                    changes = entry.get('changes', [])
+                    for change in changes:
+                        value = change.get('value', {})
+                        
+                        # Processar mensagens
+                        if 'messages' in value:
+                            for message in value['messages']:
+                                logger.info(f"📱 Mensagem detectada de: {message.get('from')}")
+                        
+                        # Processar status
+                        if 'statuses' in value:
+                            for status in value['statuses']:
+                                logger.info(f"📊 Status detectado: {status.get('status')}")
+        
+        def _process_message_received(self, event_data):
+            """Processa mensagem individual recebida"""
+            message_type = event_data.get('type', 'unknown')
+            from_number = event_data.get('from')
+            message_id = event_data.get('id')
+            
+            logger.info(f"💬 Processando mensagem {message_type} de {from_number} (ID: {message_id})")
+            
+            # Aqui você pode implementar sua lógica de negócio:
+            # - Resposta automática
+            # - Integração com CRM
+            # - Análise de conteúdo
+            # - Etc.
+            
+            if message_type == 'text':
+                text_body = event_data.get('text', {}).get('body', '')
+                logger.info(f"📝 Conteúdo da mensagem: {text_body[:100]}...")
+                
+                # Exemplo: resposta automática para palavras-chave
+                if 'oi' in text_body.lower() or 'olá' in text_body.lower():
+                    logger.info("👋 Mensagem de saudação detectada")
+        
+        def _process_status_update(self, event_data):
+            """Processa atualização de status"""
+            status = event_data.get('status')
+            message_id = event_data.get('id')
+            recipient_id = event_data.get('recipient_id')
+            
+            logger.info(f"📈 Status '{status}' para mensagem {message_id} (destinatário: {recipient_id})")
+            
+            # Aqui você pode implementar:
+            # - Atualização de status no CRM
+            # - Notificações para usuários
+            # - Métricas de entrega
+        
+        def _process_error(self, event_data):
+            """Processa erros do webhook"""
+            error_msg = event_data.get('error', 'Erro desconhecido')
+            logger.error(f"🚨 Erro do webhook: {error_msg}")
+            
+            # Aqui você pode implementar:
+            # - Alertas para administradores
+            # - Retry automático
+            # - Análise de erros
+        
+        def start_consuming(self, queue_name):
+            """Inicia o consumo de uma fila específica"""
+            if not RABBITMQ_ENABLED:
+                logger.error("❌ RabbitMQ está desabilitado")
+                return False
+            
+            logger.info(f"🚀 Iniciando worker para fila: {queue_name}")
+            logger.info("=" * 60)
+            logger.info(f"Worker PID: {os.getpid()}")
+            logger.info(f"Timestamp: {datetime.now().isoformat()}")
+            logger.info("=" * 60)
+            
+            try:
+                # Conectar ao RabbitMQ
+                if not rabbitmq_manager.connect():
+                    logger.error("❌ Falha ao conectar ao RabbitMQ")
+                    return False
+                
+                # Consumir mensagens
+                def callback(message):
+                    if not self.running:
+                        return False
+                    return self.process_webhook_message(message)
+                
+                logger.info(f"🎧 Aguardando mensagens da fila '{queue_name}'...")
+                rabbitmq_manager.consume_messages(queue_name, callback, auto_ack=False)
+                
+            except KeyboardInterrupt:
+                logger.info("⏹️ Parando worker por interrupção do usuário")
+            except Exception as e:
+                logger.error(f"❌ Erro no worker: {e}")
+            finally:
+                self._cleanup()
+            
+            return True
+        
+        def _cleanup(self):
+            """Limpa recursos antes de finalizar"""
+            logger.info("🧹 Realizando limpeza...")
+            
+            # Fechar conexões
+            try:
+                rabbitmq_manager.disconnect()
+                db_manager.disconnect()
+            except Exception as e:
+                logger.error(f"❌ Erro na limpeza: {e}")
+            
+            # Log final
+            logger.info("=" * 60)
+            logger.info("📊 ESTATÍSTICAS DO WORKER")
+            logger.info(f"✅ Mensagens processadas: {self.processed_count}")
+            logger.info(f"❌ Erros encontrados: {self.error_count}")
+            logger.info(f"⏰ Tempo de execução: {datetime.now().isoformat()}")
+            logger.info("=" * 60)
+            logger.info("🏁 Worker finalizado")
+    
+    def main():
+        """Função principal do worker"""
+        import os
+        
+        # Verificar argumentos
+        if len(sys.argv) < 2:
+            print("Uso: python webhook_worker.py <queue_name>")
+            print("Filas disponíveis:")
+            print(f"  - {WEBHOOK_QUEUE} (webhook geral)")
+            print(f"  - {MESSAGE_QUEUE} (mensagens)")
+            print(f"  - {STATUS_QUEUE} (status)")
+            print(f"  - {ERROR_QUEUE} (erros)")
+            sys.exit(1)
+        
+        queue_name = sys.argv[1]
+        valid_queues = [WEBHOOK_QUEUE, MESSAGE_QUEUE, STATUS_QUEUE, ERROR_QUEUE]
+        
+        if queue_name not in valid_queues:
+            logger.error(f"❌ Fila inválida: {queue_name}")
+            logger.info(f"Filas válidas: {', '.join(valid_queues)}")
+            sys.exit(1)
+        
+        # Iniciar worker
+        worker = WebhookWorker()
+        worker.start_consuming(queue_name)
+    
+    if __name__ == '__main__':
+        main() 
   requirements.txt: |
     Flask==3.0.0
     flask-cors==4.0.0
     requests==2.31.0
     mysql-connector-python==8.2.0
     pymysql==1.1.0
-    cryptography==41.0.7 
+    cryptography==41.0.7
+    pika==1.3.2 
   index.html: |
     <!DOCTYPE html>
     <html lang="pt-BR">

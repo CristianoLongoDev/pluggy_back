@@ -6,7 +6,7 @@ metadata:
   labels:
     app: whatsapp-webhook
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
       app: whatsapp-webhook
@@ -59,6 +59,12 @@ spec:
           mountPath: /app/database.py
           subPath: database.py
         - name: app-config
+          mountPath: /app/rabbitmq_manager.py
+          subPath: rabbitmq_manager.py
+        - name: app-config
+          mountPath: /app/webhook_worker.py
+          subPath: webhook_worker.py
+        - name: app-config
           mountPath: /app/requirements.txt
           subPath: requirements.txt
         - name: frontend-config
@@ -76,11 +82,11 @@ spec:
           python app.py
         resources:
           requests:
-            memory: "1Gi"
-            cpu: "500m"
+            memory: "256Mi"
+            cpu: "100m"
           limits:
-            memory: "2Gi"
-            cpu: "1000m"
+            memory: "512Mi"
+            cpu: "300m"
         livenessProbe:
           httpGet:
             path: /health
@@ -108,6 +114,10 @@ spec:
             path: config.py
           - key: database.py
             path: database.py
+          - key: rabbitmq_manager.py
+            path: rabbitmq_manager.py
+          - key: webhook_worker.py
+            path: webhook_worker.py
           - key: requirements.txt
             path: requirements.txt
       - name: frontend-config

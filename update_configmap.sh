@@ -29,6 +29,16 @@ echo "" >> k8s/configmap_temp.yaml
 echo "  config.py: |" >> k8s/configmap_temp.yaml
 sed 's/^/    /' config.py >> k8s/configmap_temp.yaml
 
+# Adicionar rabbitmq_manager.py
+echo "" >> k8s/configmap_temp.yaml
+echo "  rabbitmq_manager.py: |" >> k8s/configmap_temp.yaml
+sed 's/^/    /' rabbitmq_manager.py >> k8s/configmap_temp.yaml
+
+# Adicionar webhook_worker.py
+echo "" >> k8s/configmap_temp.yaml
+echo "  webhook_worker.py: |" >> k8s/configmap_temp.yaml
+sed 's/^/    /' webhook_worker.py >> k8s/configmap_temp.yaml
+
 # Adicionar requirements.txt
 echo "" >> k8s/configmap_temp.yaml
 echo "  requirements.txt: |" >> k8s/configmap_temp.yaml

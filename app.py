@@ -6,9 +6,11 @@ import os
 from config import (
     WEBHOOK_VERIFY_TOKEN, DEBUG, HOST, PORT, LOG_LEVEL, 
     SSL_CERT_PATH, SSL_KEY_PATH, USE_SSL,
-    DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD, DB_ENABLED
+    DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD, DB_ENABLED,
+    RABBITMQ_ENABLED, RABBITMQ_HOST, RABBITMQ_PORT
 )
 from database import db_manager
+from rabbitmq_manager import rabbitmq_manager
 from datetime import datetime
 import traceback
 import time
@@ -45,7 +47,8 @@ def api():
         "message": "HELLO WORLD",
         "status": "success",
         "endpoint": "/api",
-        "database_status": db_manager.get_connection_status()
+        "database_status": db_manager.get_connection_status(),
+        "rabbitmq_status": rabbitmq_manager.get_status()
     })
 
 @app.route('/health')
@@ -58,7 +61,8 @@ def health_check():
             'message': 'API está funcionando!',
             'timestamp': datetime.now().isoformat(),
             'version': '1.0.0',
-            'database': 'unknown'
+            'database': 'unknown',
+            'rabbitmq': 'unknown'
         }
         
         # Verificar conexão com banco (opcional, não falha se não conseguir)
@@ -77,8 +81,18 @@ def health_check():
         else:
             health_status['database'] = 'disabled'
         
+        # Verificar RabbitMQ (opcional, não falha se não conseguir)
+        if rabbitmq_manager.enabled:
+            try:
+                rabbitmq_status = rabbitmq_manager.get_status()
+                health_status['rabbitmq'] = rabbitmq_status.get('status', 'unknown')
+            except Exception as e:
+                health_status['rabbitmq'] = f'error: {str(e)}'
+        else:
+            health_status['rabbitmq'] = 'disabled'
+        
         # Log da verificação de saúde
-        logger.info(f"Health check realizado: {health_status['status']}, DB: {health_status['database']}")
+        logger.info(f"Health check realizado: {health_status['status']}, DB: {health_status['database']}, RabbitMQ: {health_status['rabbitmq']}")
         
         return jsonify(health_status), 200
         
@@ -161,6 +175,19 @@ def get_logs_by_type(event_type):
         logger.error(f"Erro ao buscar logs por tipo: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
+@app.route('/rabbitmq/status')
+def rabbitmq_status():
+    """Endpoint para verificar status do RabbitMQ e suas filas"""
+    try:
+        status = rabbitmq_manager.get_status()
+        return jsonify(status)
+    except Exception as e:
+        logger.error(f"Erro ao obter status do RabbitMQ: {e}")
+        return jsonify({
+            'status': 'error',
+            'error': str(e)
+        }), 500
+
 @app.route('/webhook', methods=['GET'])
 def verify_webhook():
     """
@@ -208,7 +235,21 @@ def webhook():
         
         logger.info(f"Webhook recebido: {json.dumps(body, indent=2)}")
         
-        # Tentativa de salvar evento no banco (não crítico)
+        # PRIORITÁRIO: Salvar no RabbitMQ (garante que não perde mensagem)
+        rabbitmq_saved = False
+        try:
+            if rabbitmq_manager and rabbitmq_manager.enabled:
+                rabbitmq_saved = rabbitmq_manager.publish_webhook_event('webhook_received', body)
+                if rabbitmq_saved:
+                    logger.info("✅ Evento salvo no RabbitMQ com sucesso")
+                else:
+                    logger.warning("⚠️ Falha ao salvar evento no RabbitMQ")
+            else:
+                logger.debug("RabbitMQ desabilitado - evento não salvo na fila")
+        except Exception as rabbitmq_error:
+            logger.error(f"❌ Erro crítico ao salvar no RabbitMQ: {rabbitmq_error}")
+        
+        # SECUNDÁRIO: Tentativa de salvar evento no banco (não crítico)
         try:
             if db_manager and db_manager.enabled:
                 db_manager.save_webhook_event('webhook_received', body)
@@ -292,7 +333,14 @@ def process_message_safe(message):
     try:
         logger.info(f"Processando mensagem: {json.dumps(message, indent=2)}")
         
-        # Tentativa de salvar mensagem no banco (não crítico)
+        # PRIORITÁRIO: Salvar no RabbitMQ
+        try:
+            if rabbitmq_manager and rabbitmq_manager.enabled:
+                rabbitmq_manager.publish_webhook_event('message_received', message)
+        except Exception as rabbitmq_error:
+            logger.warning(f"Falha ao salvar mensagem no RabbitMQ: {rabbitmq_error}")
+        
+        # SECUNDÁRIO: Tentativa de salvar mensagem no banco (não crítico)
         try:
             if db_manager and db_manager.enabled:
                 db_manager.save_webhook_event('message_received', message)
@@ -319,7 +367,14 @@ def process_status_safe(status):
     try:
         logger.info(f"Processando status: {json.dumps(status, indent=2)}")
         
-        # Tentativa de salvar status no banco (não crítico)
+        # PRIORITÁRIO: Salvar no RabbitMQ
+        try:
+            if rabbitmq_manager and rabbitmq_manager.enabled:
+                rabbitmq_manager.publish_webhook_event('status_update', status)
+        except Exception as rabbitmq_error:
+            logger.warning(f"Falha ao salvar status no RabbitMQ: {rabbitmq_error}")
+        
+        # SECUNDÁRIO: Tentativa de salvar status no banco (não crítico)
         try:
             if db_manager and db_manager.enabled:
                 db_manager.save_webhook_event('status_update', status)
@@ -380,6 +435,22 @@ if __name__ == '__main__':
             logger.info("A aplicação continuará funcionando, mas os logs não serão salvos")
     else:
         logger.info("📊 Banco de dados desabilitado")
+    
+    # Tentar conectar ao RabbitMQ
+    if rabbitmq_manager.enabled:
+        logger.info("🐰 Tentando conectar ao RabbitMQ...")
+        logger.info(f"RabbitMQ Config: {RABBITMQ_HOST}:{RABBITMQ_PORT}")
+        
+        rabbitmq_connected = rabbitmq_manager.connect()
+        
+        if rabbitmq_connected:
+            logger.info("✅ Conectado ao RabbitMQ com sucesso!")
+            logger.info("📬 Filas declaradas e prontas para uso")
+        else:
+            logger.warning("⚠️ Não foi possível conectar ao RabbitMQ na inicialização")
+            logger.info("A aplicação continuará funcionando, mas sem mensageria")
+    else:
+        logger.info("🐰 RabbitMQ desabilitado")
     
     # Iniciar servidor Flask
     logger.info(f"🌐 Iniciando servidor Flask em {HOST}:{PORT}")

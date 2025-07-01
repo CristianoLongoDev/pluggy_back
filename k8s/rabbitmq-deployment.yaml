@@ -1,0 +1,176 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: rabbitmq-pvc
+  namespace: whatsapp-webhook
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+  storageClassName: oci-bv
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: rabbitmq-secret
+  namespace: whatsapp-webhook
+type: Opaque
+data:
+  # usuario: admin
+  username: YWRtaW4=
+  # senha: rabbitmq123
+  password: cmFiYml0bXExMjM=
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rabbitmq-config
+  namespace: whatsapp-webhook
+data:
+  enabled_plugins: |
+    [rabbitmq_management,rabbitmq_prometheus,rabbitmq_web_dispatch].
+  rabbitmq.conf: |
+    ## Enable logging
+    log.console = true
+    log.console.level = info
+    log.file = false
+    
+    ## Memory and disk limits
+    vm_memory_high_watermark.relative = 0.8
+    disk_free_limit.relative = 1.0
+    
+    ## Default user
+    default_user = admin
+    default_pass = rabbitmq123
+    
+    ## Network
+    listeners.tcp.default = 5672
+    management.listener.port = 15672
+    management.listener.ssl = false
+    
+    ## Disable cluster formation (single node)
+    cluster_formation.peer_discovery_backend = classic_config
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rabbitmq
+  namespace: whatsapp-webhook
+  labels:
+    app: rabbitmq
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rabbitmq
+  template:
+    metadata:
+      labels:
+        app: rabbitmq
+    spec:
+      containers:
+      - name: rabbitmq
+        image: rabbitmq:3.12-management
+        ports:
+        - containerPort: 5672
+          name: amqp
+        - containerPort: 15672
+          name: management
+        env:
+        - name: RABBITMQ_DEFAULT_USER
+          valueFrom:
+            secretKeyRef:
+              name: rabbitmq-secret
+              key: username
+        - name: RABBITMQ_DEFAULT_PASS
+          valueFrom:
+            secretKeyRef:
+              name: rabbitmq-secret
+              key: password
+        - name: RABBITMQ_ERLANG_COOKIE
+          value: "whatsapp-webhook-cookie"
+        volumeMounts:
+        - name: rabbitmq-storage
+          mountPath: /var/lib/rabbitmq
+        - name: rabbitmq-config-volume
+          mountPath: /etc/rabbitmq/conf.d/
+        - name: rabbitmq-plugins-volume
+          mountPath: /etc/rabbitmq/enabled_plugins
+          subPath: enabled_plugins
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          exec:
+            command:
+            - rabbitmq-diagnostics
+            - ping
+          initialDelaySeconds: 60
+          periodSeconds: 10
+          timeoutSeconds: 5
+        readinessProbe:
+          exec:
+            command:
+            - rabbitmq-diagnostics
+            - check_port_connectivity
+          initialDelaySeconds: 20
+          periodSeconds: 5
+          timeoutSeconds: 3
+      volumes:
+      - name: rabbitmq-storage
+        persistentVolumeClaim:
+          claimName: rabbitmq-pvc
+      - name: rabbitmq-config-volume
+        configMap:
+          name: rabbitmq-config
+          items:
+          - key: rabbitmq.conf
+            path: rabbitmq.conf
+      - name: rabbitmq-plugins-volume
+        configMap:
+          name: rabbitmq-config
+          items:
+          - key: enabled_plugins
+            path: enabled_plugins
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rabbitmq-service
+  namespace: whatsapp-webhook
+  labels:
+    app: rabbitmq
+spec:
+  type: ClusterIP
+  ports:
+  - port: 5672
+    targetPort: 5672
+    name: amqp
+  - port: 15672
+    targetPort: 15672
+    name: management
+  selector:
+    app: rabbitmq
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rabbitmq-management
+  namespace: whatsapp-webhook
+  labels:
+    app: rabbitmq
+spec:
+  type: NodePort
+  ports:
+  - port: 15672
+    targetPort: 15672
+    nodePort: 31672
+    name: management
+  selector:
+    app: rabbitmq 

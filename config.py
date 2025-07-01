@@ -48,4 +48,17 @@ DB_PASSWORD = os.getenv('DB_PASSWORD', '8/vLQv98vCmw%Ox1')
 DB_ENABLED = os.getenv('DB_ENABLED', 'True').lower() == 'true'
 
 # Configurações de logging
-LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO') 
+LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
+
+# Configurações do RabbitMQ
+RABBITMQ_HOST = os.getenv('RABBITMQ_HOST', 'rabbitmq-service.whatsapp-webhook.svc.cluster.local')
+RABBITMQ_PORT = int(os.getenv('RABBITMQ_PORT', 5672))
+RABBITMQ_USER = os.getenv('RABBITMQ_USER', 'admin')
+RABBITMQ_PASSWORD = os.getenv('RABBITMQ_PASSWORD', 'rabbitmq123')
+RABBITMQ_ENABLED = os.getenv('RABBITMQ_ENABLED', 'True').lower() == 'true'
+
+# Configurações das filas RabbitMQ
+WEBHOOK_QUEUE = 'webhook_messages'
+MESSAGE_QUEUE = 'processed_messages'
+STATUS_QUEUE = 'status_updates'
+ERROR_QUEUE = 'error_messages' 
