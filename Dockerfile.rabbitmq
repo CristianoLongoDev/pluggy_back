@@ -1,0 +1,55 @@
+# Multi-stage build para RabbitMQ otimizado
+FROM rabbitmq:3.12-management as base
+
+# Definir variáveis de ambiente
+ENV RABBITMQ_DEFAULT_USER=admin \
+    RABBITMQ_DEFAULT_PASS=rabbitmq123 \
+    RABBITMQ_ERLANG_COOKIE=whatsapp-webhook-cookie
+
+# Criar usuário não-root para segurança
+RUN groupadd -r rabbitmq-custom && useradd -r -g rabbitmq-custom rabbitmq-custom
+
+# Copiar configurações customizadas
+COPY k8s/rabbitmq-config/rabbitmq.conf /etc/rabbitmq/conf.d/rabbitmq.conf
+COPY k8s/rabbitmq-config/enabled_plugins /etc/rabbitmq/enabled_plugins
+
+# Definir permissões corretas
+RUN chown -R rabbitmq:rabbitmq /etc/rabbitmq/ && \
+    chmod 644 /etc/rabbitmq/conf.d/rabbitmq.conf && \
+    chmod 644 /etc/rabbitmq/enabled_plugins
+
+# Pré-criar diretórios necessários
+RUN mkdir -p /var/lib/rabbitmq/mnesia && \
+    chown -R rabbitmq:rabbitmq /var/lib/rabbitmq && \
+    chmod 755 /var/lib/rabbitmq/mnesia
+
+# Criar script de inicialização otimizado
+RUN echo '#!/bin/bash\n\
+set -e\n\
+\n\
+# Aguardar rede estar disponível\n\
+sleep 2\n\
+\n\
+# Inicializar RabbitMQ com configurações pré-carregadas\n\
+echo "Iniciando RabbitMQ com configurações otimizadas..."\n\
+\n\
+# Executar comando original do RabbitMQ\n\
+exec docker-entrypoint.sh "$@"\n\
+' > /usr/local/bin/rabbitmq-optimized.sh && \
+    chmod +x /usr/local/bin/rabbitmq-optimized.sh
+
+# Health check integrado
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+  CMD rabbitmq-diagnostics ping || exit 1
+
+# Exposer portas
+EXPOSE 5672 15672
+
+# Usar script otimizado como entrypoint
+ENTRYPOINT ["/usr/local/bin/rabbitmq-optimized.sh"]
+CMD ["rabbitmq-server"]
+
+# Labels para identificação
+LABEL maintainer="WhatsApp Webhook Team" \
+      version="1.0" \
+      description="RabbitMQ otimizado para webhook worker" 

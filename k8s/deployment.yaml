@@ -17,7 +17,7 @@ spec:
     spec:
       containers:
       - name: whatsapp-webhook
-        image: python:3.11-slim
+        image: cristianopluggerbi/whatsapp-webhook:latest
         ports:
         - containerPort: 5000
         env:
@@ -48,45 +48,26 @@ spec:
           value: "8/vLQv98vCmw%Ox1"
         - name: DB_ENABLED
           value: "True"
-        volumeMounts:
-        - name: app-config
-          mountPath: /app/app.py
-          subPath: app.py
-        - name: app-config
-          mountPath: /app/config.py
-          subPath: config.py
-        - name: app-config
-          mountPath: /app/database.py
-          subPath: database.py
-        - name: app-config
-          mountPath: /app/rabbitmq_manager.py
-          subPath: rabbitmq_manager.py
-        - name: app-config
-          mountPath: /app/webhook_worker.py
-          subPath: webhook_worker.py
-        - name: app-config
-          mountPath: /app/requirements.txt
-          subPath: requirements.txt
-        - name: frontend-config
-          mountPath: /app/frontend/index.html
-          subPath: index.html
+        - name: RABBITMQ_ENABLED
+          value: "True"
+        - name: RABBITMQ_HOST
+          value: "rabbitmq-service.whatsapp-webhook.svc.cluster.local"
+        - name: RABBITMQ_PORT
+          value: "5672"
+        - name: RABBITMQ_USER
+          value: "admin"
+        - name: RABBITMQ_PASSWORD
+          value: "rabbitmq123"
         workingDir: /app
-        command: ["/bin/bash"]
-        args:
-        - -c
-        - |
-          if [ ! -f /tmp/dependencies_installed ]; then
-            pip install --no-cache-dir -r requirements.txt
-            touch /tmp/dependencies_installed
-          fi
-          python app.py
+        command: ["python"]
+        args: ["app.py"]
         resources:
           requests:
-            memory: "256Mi"
-            cpu: "100m"
+            memory: "32Mi"
+            cpu: "20m"
           limits:
-            memory: "512Mi"
-            cpu: "300m"
+            memory: "64Mi"
+            cpu: "100m"
         livenessProbe:
           httpGet:
             path: /health
@@ -104,25 +85,9 @@ spec:
           timeoutSeconds: 5
           failureThreshold: 5
       volumes:
-      - name: app-config
-        configMap:
-          name: whatsapp-webhook-config
-          items:
-          - key: app.py
-            path: app.py
-          - key: config.py
-            path: config.py
-          - key: database.py
-            path: database.py
-          - key: rabbitmq_manager.py
-            path: rabbitmq_manager.py
-          - key: webhook_worker.py
-            path: webhook_worker.py
-          - key: requirements.txt
-            path: requirements.txt
       - name: frontend-config
         configMap:
           name: whatsapp-webhook-config
           items:
           - key: index.html
-            path: index.html 
+            path: index.html

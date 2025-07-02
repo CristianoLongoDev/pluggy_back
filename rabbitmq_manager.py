@@ -153,8 +153,8 @@ class RabbitMQManager:
         }
         
         # Escolher fila baseada no tipo de evento
-        if event_type in ['message_received']:
-            queue = MESSAGE_QUEUE
+        if event_type in ['message_received', 'webhook_received']:
+            queue = WEBHOOK_QUEUE  # Mensagens novas vão para webhook_messages
         elif event_type in ['status_update']:
             queue = STATUS_QUEUE
         elif event_type in ['webhook_error', 'webhook_critical_error']:

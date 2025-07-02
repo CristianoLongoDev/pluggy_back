@@ -45,8 +45,8 @@ env/
 ehthumbs.db
 Thumbs.db
 
-# Kubernetes
-k8s/
+# Kubernetes (alguns configs são necessários para builds customizados)
+# k8s/
 
 # Scripts
 deploy.sh

@@ -1,0 +1,68 @@
+# Multi-stage build para criar uma imagem mínima e otimizada para o webhook worker
+FROM python:3.11-alpine AS builder
+
+# Instalar dependências de compilação necessárias para as bibliotecas Python
+RUN apk add --no-cache \
+    gcc \
+    musl-dev \
+    libffi-dev \
+    openssl-dev \
+    mysql-dev \
+    build-base
+
+# Criar diretório de trabalho
+WORKDIR /app
+
+# Copiar requirements específico para o webhook worker (sem Flask e flask-cors)
+COPY requirements-worker.txt /app/requirements-worker.txt
+
+# Instalar dependências Python em um diretório específico
+RUN pip install --no-cache-dir --user -r requirements-worker.txt
+
+# Stage final - imagem mínima
+FROM python:3.11-alpine
+
+# Instalar apenas as dependências de runtime necessárias
+RUN apk add --no-cache \
+    libffi \
+    openssl \
+    mysql-client \
+    && rm -rf /var/cache/apk/*
+
+# Criar usuário não-root para segurança
+RUN addgroup -g 1001 -S appgroup && \
+    adduser -u 1001 -S appuser -G appgroup
+
+# Copiar as dependências Python instaladas do stage builder
+COPY --from=builder /root/.local /home/appuser/.local
+
+# Criar diretório da aplicação
+WORKDIR /app
+
+# Copiar apenas os arquivos necessários para o webhook worker
+COPY webhook_worker.py .
+COPY rabbitmq_manager.py .
+COPY database.py .
+COPY config.py .
+
+# Criar diretório para logs com permissões adequadas
+RUN mkdir -p /tmp && \
+    chown -R appuser:appgroup /app /tmp
+
+# Trocar para usuário não-root
+USER appuser
+
+# Configurar PATH para incluir os binários Python do usuário
+ENV PATH=/home/appuser/.local/bin:$PATH
+
+# Configurar variáveis de ambiente para otimização
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONOPTIMIZE=2
+
+# Health check específico para o worker
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD python -c "import sys; import os; sys.exit(0 if os.path.exists('/tmp/webhook_worker.log') else 1)"
+
+# Comando padrão - pode ser sobrescrito no deployment
+CMD ["python", "webhook_worker.py", "webhook_messages"] 

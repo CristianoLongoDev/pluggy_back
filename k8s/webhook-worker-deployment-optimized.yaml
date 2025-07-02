@@ -1,0 +1,231 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: webhook-worker-optimized
+  namespace: whatsapp-webhook
+  labels:
+    app: webhook-worker-optimized
+    version: optimized
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: webhook-worker-optimized
+  template:
+    metadata:
+      labels:
+        app: webhook-worker-optimized
+        version: optimized
+    spec:
+      containers:
+      - name: webhook-worker
+        # Usar a imagem customizada e otimizada do Docker Hub
+        image: cristianopluggerbi/webhook-worker:latest
+        imagePullPolicy: Always
+        
+        # Comando simplificado - sem instalação de dependências
+        args: ["python", "webhook_worker.py", "webhook_messages"]
+        
+        env:
+        - name: WEBHOOK_VERIFY_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: whatsapp-webhook-secret
+              key: WEBHOOK_VERIFY_TOKEN
+        - name: DB_HOST
+          value: "168.75.106.98"
+        - name: DB_PORT
+          value: "6446"
+        - name: DB_NAME
+          value: "atendimento"
+        - name: DB_USER
+          value: "atendimento"
+        - name: DB_PASSWORD
+          value: "8/vLQv98vCmw%Ox1"
+        - name: DB_ENABLED
+          value: "True"
+        - name: RABBITMQ_HOST
+          value: "rabbitmq-service.whatsapp-webhook.svc.cluster.local"
+        - name: RABBITMQ_PORT
+          value: "5672"
+        - name: RABBITMQ_USER
+          valueFrom:
+            secretKeyRef:
+              name: rabbitmq-secret
+              key: username
+        - name: RABBITMQ_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: rabbitmq-secret
+              key: password
+        - name: RABBITMQ_ENABLED
+          value: "True"
+        - name: LOG_LEVEL
+          value: "INFO"
+        
+        # Recursos otimizados para a imagem menor
+        resources:
+          requests:
+            memory: "24Mi"    # Reduzido de 32Mi
+            cpu: "15m"        # Reduzido de 20m
+          limits:
+            memory: "48Mi"    # Reduzido de 64Mi
+            cpu: "80m"        # Reduzido de 100m
+        
+        # Health checks otimizados
+        livenessProbe:
+          exec:
+            command:
+            - python
+            - -c
+            - "import sys; import os; sys.exit(0 if os.path.exists('/tmp/webhook_worker.log') else 1)"
+          initialDelaySeconds: 30  # Reduzido de 60s
+          periodSeconds: 30
+          timeoutSeconds: 5
+          failureThreshold: 3
+        
+        readinessProbe:
+          exec:
+            command:
+            - /bin/sh
+            - -c
+            - "test -f /tmp/webhook_worker.log && echo 'Worker ready'"
+          initialDelaySeconds: 20
+          periodSeconds: 15
+          timeoutSeconds: 5
+          failureThreshold: 3
+        
+        # Volume para logs (opcional)
+        volumeMounts:
+        - name: tmp-logs
+          mountPath: /tmp
+      
+      volumes:
+      - name: tmp-logs
+        emptyDir:
+          sizeLimit: "50Mi"
+      
+      # Configurações de segurança
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        fsGroup: 1001
+      
+      restartPolicy: Always
+      
+      # Tolerância a falhas e distribuição de pods
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - webhook-worker-optimized
+              topologyKey: kubernetes.io/hostname
+
+---
+# Worker para mensagens específicas - versão otimizada
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: message-worker-optimized
+  namespace: whatsapp-webhook
+  labels:
+    app: message-worker-optimized
+    version: optimized
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: message-worker-optimized
+  template:
+    metadata:
+      labels:
+        app: message-worker-optimized
+        version: optimized
+    spec:
+      containers:
+      - name: message-worker
+        # Usar a mesma imagem customizada do Docker Hub
+        image: cristianopluggerbi/webhook-worker:latest
+        imagePullPolicy: Always
+        
+        # Comando para processar fila de mensagens
+        args: ["python", "webhook_worker.py", "processed_messages"]
+        
+        env:
+        - name: WEBHOOK_VERIFY_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: whatsapp-webhook-secret
+              key: WEBHOOK_VERIFY_TOKEN
+        - name: DB_HOST
+          value: "168.75.106.98"
+        - name: DB_PORT
+          value: "6446"
+        - name: DB_NAME
+          value: "atendimento"
+        - name: DB_USER
+          value: "atendimento"
+        - name: DB_PASSWORD
+          value: "8/vLQv98vCmw%Ox1"
+        - name: DB_ENABLED
+          value: "True"
+        - name: RABBITMQ_HOST
+          value: "rabbitmq-service.whatsapp-webhook.svc.cluster.local"
+        - name: RABBITMQ_PORT
+          value: "5672"
+        - name: RABBITMQ_USER
+          valueFrom:
+            secretKeyRef:
+              name: rabbitmq-secret
+              key: username
+        - name: RABBITMQ_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: rabbitmq-secret
+              key: password
+        - name: RABBITMQ_ENABLED
+          value: "True"
+        - name: LOG_LEVEL
+          value: "INFO"
+        
+        resources:
+          requests:
+            memory: "24Mi"
+            cpu: "15m"
+          limits:
+            memory: "48Mi"
+            cpu: "80m"
+        
+        livenessProbe:
+          exec:
+            command:
+            - python
+            - -c
+            - "import sys; import os; sys.exit(0 if os.path.exists('/tmp/webhook_worker.log') else 1)"
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          timeoutSeconds: 5
+        
+        volumeMounts:
+        - name: tmp-logs
+          mountPath: /tmp
+      
+      volumes:
+      - name: tmp-logs
+        emptyDir:
+          sizeLimit: "50Mi"
+      
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        fsGroup: 1001
+      
+      restartPolicy: Always 

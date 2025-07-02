@@ -249,16 +249,7 @@ def webhook():
         except Exception as rabbitmq_error:
             logger.error(f"❌ Erro crítico ao salvar no RabbitMQ: {rabbitmq_error}")
         
-        # SECUNDÁRIO: Tentativa de salvar evento no banco (não crítico)
-        try:
-            if db_manager and db_manager.enabled:
-                db_manager.save_webhook_event('webhook_received', body)
-                logger.debug("Evento salvo no banco com sucesso")
-            else:
-                logger.debug("Banco desabilitado - evento não salvo")
-        except Exception as db_error:
-            # Log do erro mas não falha o webhook
-            logger.warning(f"Falha ao salvar evento no banco (não crítico): {db_error}")
+        # Não salva no banco aqui - será salvo pelo worker para evitar duplicação
         
         # Processa o webhook apenas se for válido
         webhook_processed = False
@@ -340,12 +331,7 @@ def process_message_safe(message):
         except Exception as rabbitmq_error:
             logger.warning(f"Falha ao salvar mensagem no RabbitMQ: {rabbitmq_error}")
         
-        # SECUNDÁRIO: Tentativa de salvar mensagem no banco (não crítico)
-        try:
-            if db_manager and db_manager.enabled:
-                db_manager.save_webhook_event('message_received', message)
-        except Exception as db_error:
-            logger.warning(f"Falha ao salvar mensagem no banco: {db_error}")
+        # Não salva no banco aqui - será salvo pelo worker para evitar duplicação
         
         # Processa a mensagem independente do banco
         message_type = message.get('type', 'unknown')
@@ -374,12 +360,7 @@ def process_status_safe(status):
         except Exception as rabbitmq_error:
             logger.warning(f"Falha ao salvar status no RabbitMQ: {rabbitmq_error}")
         
-        # SECUNDÁRIO: Tentativa de salvar status no banco (não crítico)
-        try:
-            if db_manager and db_manager.enabled:
-                db_manager.save_webhook_event('status_update', status)
-        except Exception as db_error:
-            logger.warning(f"Falha ao salvar status no banco: {db_error}")
+        # Não salva no banco aqui - será salvo pelo worker para evitar duplicação
         
         # Processa o status independente do banco
         status_type = status.get('status')
