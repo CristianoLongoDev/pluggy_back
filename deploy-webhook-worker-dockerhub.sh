@@ -28,12 +28,8 @@ log_error() {
     echo -e "${RED}❌ $1${NC}"
 }
 
-# Verificar se o usuário Docker Hub foi definido
-if [ -z "$DOCKER_HUB_USER" ]; then
-    log_error "Variável DOCKER_HUB_USER não definida!"
-    echo "Configure com: export DOCKER_HUB_USER=seu_usuario_dockerhub"
-    exit 1
-fi
+# Definir usuário Docker Hub (mesmo usado nos outros scripts)
+export DOCKER_HUB_USER="cristianopluggerbi"
 
 # Configurações
 IMAGE_NAME="webhook-worker"

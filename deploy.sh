@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Script para deploy da aplicação WhatsApp Webhook no Kubernetes
-# Oracle Cloud Infrastructure
+# Oracle Cloud Infrastructure + DockerHub
 
 set -e
 
@@ -12,12 +12,21 @@ YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
 # Configurações
-REGISTRY_URL="seu-registro.ocir.io"
+DOCKERHUB_USERNAME="cristianopluggerbi"
 NAMESPACE="whatsapp-webhook"
 IMAGE_NAME="whatsapp-webhook"
 IMAGE_TAG="latest"
+FULL_IMAGE_NAME="${DOCKERHUB_USERNAME}/${IMAGE_NAME}:${IMAGE_TAG}"
 
 echo -e "${GREEN}🚀 Iniciando deploy da aplicação WhatsApp Webhook${NC}"
+echo -e "${GREEN}📊 Versão: Sistema de Logs Aprimorado${NC}"
+echo -e "${YELLOW}🐋 Imagem: ${FULL_IMAGE_NAME}${NC}"
+
+# Verificar se o Docker está rodando
+if ! docker ps &> /dev/null; then
+    echo -e "${RED}❌ Docker não está rodando ou não acessível${NC}"
+    exit 1
+fi
 
 # Verificar se o kubectl está configurado
 if ! kubectl cluster-info &> /dev/null; then
@@ -25,7 +34,7 @@ if ! kubectl cluster-info &> /dev/null; then
     exit 1
 fi
 
-echo -e "${GREEN}✅ kubectl configurado${NC}"
+echo -e "${GREEN}✅ Docker e kubectl configurados${NC}"
 
 # Criar namespace se não existir
 if ! kubectl get namespace $NAMESPACE &> /dev/null; then
@@ -35,15 +44,28 @@ fi
 
 # Construir imagem Docker
 echo -e "${YELLOW}🔨 Construindo imagem Docker...${NC}"
-docker build -t $IMAGE_NAME:$IMAGE_TAG .
+docker build -t $FULL_IMAGE_NAME .
 
-# Tag da imagem para o registry
-FULL_IMAGE_NAME="$REGISTRY_URL/$NAMESPACE/$IMAGE_NAME:$IMAGE_TAG"
-docker tag $IMAGE_NAME:$IMAGE_TAG $FULL_IMAGE_NAME
+# Verificar se a imagem foi criada
+if ! docker images $FULL_IMAGE_NAME | grep -q $IMAGE_TAG; then
+    echo -e "${RED}❌ Falha ao criar a imagem Docker${NC}"
+    exit 1
+fi
 
-# Fazer push da imagem (descomente se estiver usando registry)
-# echo -e "${YELLOW}📤 Fazendo push da imagem...${NC}"
-# docker push $FULL_IMAGE_NAME
+echo -e "${GREEN}✅ Imagem Docker criada com sucesso${NC}"
+
+# Verificar login no DockerHub
+echo -e "${YELLOW}🔑 Verificando login no DockerHub...${NC}"
+if ! docker info 2>/dev/null | grep -q "Username: ${DOCKERHUB_USERNAME}"; then
+    echo -e "${YELLOW}⚠️ Não logado no DockerHub. Fazendo login...${NC}"
+    docker login
+fi
+
+# Fazer push da imagem para o DockerHub
+echo -e "${YELLOW}📤 Fazendo push da imagem para o DockerHub...${NC}"
+docker push $FULL_IMAGE_NAME
+
+echo -e "${GREEN}✅ Imagem enviada para o DockerHub com sucesso${NC}"
 
 # Aplicar configurações do Kubernetes
 echo -e "${YELLOW}📋 Aplicando configurações do Kubernetes...${NC}"
@@ -67,18 +89,17 @@ kubectl apply -f k8s/deployment.yaml
 kubectl apply -f k8s/service.yaml
 kubectl apply -f k8s/ingress.yaml
 
+# Forçar restart dos pods para puxar a nova imagem
+echo -e "${YELLOW}🔄 Forçando restart dos pods para puxar nova imagem...${NC}"
+kubectl rollout restart deployment/whatsapp-webhook -n $NAMESPACE
+
 # Aguardar o deployment estar pronto
 echo -e "${YELLOW}⏳ Aguardando deployment estar pronto...${NC}"
-kubectl rollout status deployment/whatsapp-webhook -n $NAMESPACE
+kubectl rollout status deployment/whatsapp-webhook -n $NAMESPACE --timeout=300s
 
-# Aguardar 6 minutos para os pods inicializarem completamente
-echo -e "${YELLOW}⏳ Aguardando 6 minutos para os pods inicializarem completamente...${NC}"
-echo -e "${YELLOW}   Isso garante que as dependências sejam instaladas e a aplicação esteja pronta${NC}"
-for i in {1..6}; do
-    echo -e "${YELLOW}   Aguardando... ${i}/6 minutos${NC}"
-    sleep 60
-done
-echo -e "${GREEN}✅ Tempo de espera concluído${NC}"
+# Aguardar aplicação inicializar
+echo -e "${YELLOW}⏳ Aguardando aplicação inicializar (90 segundos)...${NC}"
+sleep 90
 
 # Verificar status dos pods
 echo -e "${YELLOW}🔍 Verificando status dos pods...${NC}"
@@ -92,10 +113,50 @@ kubectl get service whatsapp-webhook-service -n $NAMESPACE
 echo -e "${YELLOW}🔍 Verificando status do ingress...${NC}"
 kubectl get ingress whatsapp-webhook-ingress -n $NAMESPACE
 
+# Testar health check
+echo -e "${YELLOW}🏥 Testando health check...${NC}"
+if curl -s -f https://atendimento.pluggerbi.com/health &> /dev/null; then
+    echo -e "${GREEN}✅ Health check OK${NC}"
+else
+    echo -e "${YELLOW}⚠️ Health check falhou - verificando logs...${NC}"
+    kubectl logs -n $NAMESPACE -l app=whatsapp-webhook --tail=10
+fi
+
+# Executar migração de dados
+echo -e "${YELLOW}🔄 Executando migração de dados...${NC}"
+MIGRATION_RESULT=$(curl -s -X POST https://atendimento.pluggerbi.com/logs/migrate || echo "Erro na migração")
+echo -e "${GREEN}📋 Resultado da migração: ${MIGRATION_RESULT}${NC}"
+
+# Testar novos endpoints
+echo -e "${YELLOW}🧪 Testando novos endpoints...${NC}"
+if curl -s -f https://atendimento.pluggerbi.com/logs &> /dev/null; then
+    echo -e "${GREEN}✅ Endpoint /logs OK${NC}"
+else
+    echo -e "${YELLOW}⚠️ Endpoint /logs com problemas${NC}"
+fi
+
+if curl -s -f https://atendimento.pluggerbi.com/logs/by-type/text &> /dev/null; then
+    echo -e "${GREEN}✅ Endpoint /logs/by-type/text OK${NC}"
+else
+    echo -e "${YELLOW}⚠️ Endpoint /logs/by-type/text com problemas${NC}"
+fi
+
 echo -e "${GREEN}✅ Deploy concluído com sucesso!${NC}"
-echo -e "${GREEN}🌐 A aplicação estará disponível em: https://atendimento.pluggerbi.com${NC}"
-echo -e "${YELLOW}📝 Webhook URL para o WhatsApp: https://atendimento.pluggerbi.com/webhook${NC}"
+echo -e "${GREEN}📊 Alterações implementadas:${NC}"
+echo -e "${GREEN}  • ✅ Tabela logs com novos campos (type, message, id_contact)${NC}"
+echo -e "${GREEN}  • ✅ Migração automática de dados existentes${NC}"
+echo -e "${GREEN}  • ✅ Novos endpoints para consulta por tipo e contato${NC}"
+echo -e "${GREEN}  • ✅ Processamento aprimorado de mensagens WhatsApp${NC}"
+
+echo -e "${YELLOW}🌐 Endpoints disponíveis:${NC}"
+echo -e "${YELLOW}  • GET  /logs - Consultar todos os logs${NC}"
+echo -e "${YELLOW}  • GET  /logs/by-type/{tipo} - Consultar por tipo${NC}"
+echo -e "${YELLOW}  • GET  /logs/by-contact/{contato} - Consultar por contato${NC}"
+echo -e "${YELLOW}  • POST /logs/migrate - Migrar dados existentes${NC}"
+
+echo -e "${GREEN}🔗 Aplicação disponível em: https://atendimento.pluggerbi.com${NC}"
+echo -e "${GREEN}📱 Webhook URL para o WhatsApp: https://atendimento.pluggerbi.com/webhook${NC}"
 
 # Mostrar logs dos pods
-echo -e "${YELLOW}📋 Logs dos pods (últimas 10 linhas):${NC}"
-kubectl logs -n $NAMESPACE -l app=whatsapp-webhook --tail=10 
+echo -e "${YELLOW}📋 Logs dos pods (últimas 20 linhas):${NC}"
+kubectl logs -n $NAMESPACE -l app=whatsapp-webhook --tail=20 

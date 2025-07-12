@@ -110,7 +110,7 @@ def get_logs():
     try:
         # Usa o novo método execute_query que tem reconexão automática
         logs = db_manager.execute_query(
-            "SELECT * FROM logs ORDER BY created_at DESC LIMIT 100"
+            "SELECT id, event_type, type, message, id_contact, created_at FROM logs ORDER BY created_at DESC LIMIT 100"
         )
         
         if logs is None:
@@ -141,7 +141,7 @@ def get_logs_by_type(event_type):
         # Usar o método execute_query que já tem verificações de segurança
         logs = db_manager.execute_query(
             """
-            SELECT id, event_type, event_data, created_at 
+            SELECT id, event_type, type, message, id_contact, event_data, created_at 
             FROM logs 
             WHERE event_type = %s
             ORDER BY created_at DESC 
@@ -173,6 +173,95 @@ def get_logs_by_type(event_type):
         
     except Exception as e:
         logger.error(f"Erro ao buscar logs por tipo: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/logs/migrate', methods=['POST'])
+def migrate_logs():
+    """Endpoint para migrar dados existentes para os novos campos estruturados"""
+    try:
+        # Executar migração
+        success = db_manager.migrate_existing_data()
+        
+        if success:
+            return jsonify({
+                "status": "success",
+                "message": "Migração de dados concluída com sucesso"
+            })
+        else:
+            return jsonify({
+                "status": "error",
+                "message": "Falha ao executar migração de dados"
+            }), 500
+            
+    except Exception as e:
+        logger.error(f"Erro ao executar migração: {str(e)}")
+        return jsonify({
+            "status": "error",
+            "message": f"Erro interno: {str(e)}"
+        }), 500
+
+@app.route('/logs/by-type/<message_type>')
+def get_logs_by_message_type(message_type):
+    """Endpoint para buscar logs por tipo de mensagem (text, document, image, audio)"""
+    try:
+        logs = db_manager.execute_query(
+            """
+            SELECT id, event_type, type, message, id_contact, created_at 
+            FROM logs 
+            WHERE type = %s
+            ORDER BY created_at DESC 
+            LIMIT 50
+            """,
+            (message_type,)
+        )
+        
+        if logs is None:
+            return jsonify({
+                "error": "Erro ao conectar com o banco de dados",
+                "status": "error"
+            }), 500
+        
+        return jsonify({
+            "status": "success",
+            "message_type": message_type,
+            "count": len(logs),
+            "logs": logs
+        })
+        
+    except Exception as e:
+        logger.error(f"Erro ao buscar logs por tipo de mensagem: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/logs/by-contact/<contact_id>')
+def get_logs_by_contact(contact_id):
+    """Endpoint para buscar logs por ID do contato"""
+    try:
+        logs = db_manager.execute_query(
+            """
+            SELECT id, event_type, type, message, id_contact, created_at 
+            FROM logs 
+            WHERE id_contact = %s
+            ORDER BY created_at DESC 
+            LIMIT 100
+            """,
+            (contact_id,)
+        )
+        
+        if logs is None:
+            return jsonify({
+                "error": "Erro ao conectar com o banco de dados",
+                "status": "error"
+            }), 500
+        
+        return jsonify({
+            "status": "success",
+            "contact_id": contact_id,
+            "count": len(logs),
+            "logs": logs
+        })
+        
+    except Exception as e:
+        logger.error(f"Erro ao buscar logs por contato: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
 @app.route('/rabbitmq/status')
@@ -409,6 +498,14 @@ if __name__ == '__main__':
             # Criar tabela se não existir
             if db_manager.create_table_if_not_exists():
                 logger.info("✅ Tabela de logs verificada/criada")
+                
+                # Executar migração de dados existentes
+                logger.info("🔄 Executando migração de dados existentes...")
+                migration_success = db_manager.migrate_existing_data()
+                if migration_success:
+                    logger.info("✅ Migração de dados concluída com sucesso")
+                else:
+                    logger.warning("⚠️ Migração de dados falhou ou não foi necessária")
             else:
                 logger.warning("⚠️ Não foi possível criar/verificar tabela de logs")
         else:
