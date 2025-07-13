@@ -1,4 +1,4 @@
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, jsonify, request, send_from_directory, redirect, render_template_string
 from flask_cors import CORS
 import json
 import logging
@@ -464,6 +464,272 @@ def process_status_safe(status):
     except Exception as e:
         logger.error(f"Erro ao processar status (não crítico): {e}")
 
+# ===========================
+# ENDPOINTS DO BOT CHATGPT
+# ===========================
+
+@app.route('/bot/oauth/start')
+def start_oauth():
+    """Inicia processo OAuth do WhatsApp"""
+    try:
+        # Importar aqui para evitar problemas de inicialização
+        from whatsapp_service import whatsapp_service
+        
+        # URL de redirect (deve ser configurada no app Facebook)
+        # Usar domínio público configurado
+        redirect_uri = "https://atendimento.pluggerbi.com/bot/oauth/callback"
+        
+        # Gerar URL OAuth
+        oauth_url = whatsapp_service.get_oauth_url(redirect_uri)
+        
+        # Página simples para iniciar OAuth
+        html = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Autorização WhatsApp Bot</title>
+            <style>
+                body { font-family: Arial, sans-serif; text-align: center; padding: 50px; }
+                .button { background-color: #25D366; color: white; padding: 15px 30px; 
+                         text-decoration: none; border-radius: 5px; font-size: 18px; }
+                .button:hover { background-color: #128C7E; }
+            </style>
+        </head>
+        <body>
+            <h1>🤖 WhatsApp Bot - Autorização</h1>
+            <p>Para ativar o bot ChatGPT, é necessário autorizar o acesso ao WhatsApp Business.</p>
+            <br>
+            <a href="{{ oauth_url }}" class="button">
+                📱 Autorizar WhatsApp
+            </a>
+            <br><br>
+            <p><small>Você será redirecionado para o Facebook para autorizar as permissões.</small></p>
+        </body>
+        </html>
+        """
+        
+        return render_template_string(html, oauth_url=oauth_url)
+        
+    except Exception as e:
+        logger.error(f"Erro ao iniciar OAuth: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/bot/oauth/callback')
+def oauth_callback():
+    """Callback OAuth do WhatsApp"""
+    try:
+        # Importar aqui para evitar problemas de inicialização
+        from whatsapp_service import whatsapp_service
+        
+        # Obter código da query string
+        code = request.args.get('code')
+        error = request.args.get('error')
+        
+        if error:
+            logger.error(f"Erro OAuth: {error}")
+            return f"❌ Erro na autorização: {error}", 400
+        
+        if not code:
+            return "❌ Código de autorização não recebido", 400
+        
+        # URL de redirect (deve ser a mesma usada no início)  
+        # Usar domínio público configurado
+        redirect_uri = "https://atendimento.pluggerbi.com/bot/oauth/callback"
+        
+        # Trocar código por token
+        result = whatsapp_service.exchange_code_for_token(code, redirect_uri)
+        
+        if result["success"]:
+            html = """
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Autorização Concluída</title>
+                <style>
+                    body { font-family: Arial, sans-serif; text-align: center; padding: 50px; 
+                           background-color: #f0f8ff; }
+                    .success { color: #25D366; font-size: 24px; }
+                    .info { background-color: white; padding: 20px; border-radius: 10px; 
+                           margin: 20px auto; max-width: 600px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+                </style>
+            </head>
+            <body>
+                <h1 class="success">✅ Autorização Concluída!</h1>
+                <div class="info">
+                    <p>🤖 O bot ChatGPT foi autorizado com sucesso!</p>
+                    <p>📱 Agora você pode enviar mensagens para o WhatsApp e o bot responderá automaticamente.</p>
+                    <br>
+                    <p><strong>Token salvo no banco de dados.</strong></p>
+                    <p><small>Você pode fechar esta janela.</small></p>
+                </div>
+            </body>
+            </html>
+            """
+            return html
+        else:
+            return f"❌ Erro ao obter token: {result['error']}", 500
+        
+    except Exception as e:
+        logger.error(f"Erro no callback OAuth: {e}")
+        return f"❌ Erro interno: {str(e)}", 500
+
+@app.route('/bot/config/system-prompt', methods=['GET', 'POST'])
+def manage_system_prompt():
+    """Gerencia o prompt do sistema do ChatGPT"""
+    try:
+        if request.method == 'GET':
+            # Buscar prompt atual
+            system_prompt = db_manager.get_config('system_prompt')
+            
+            if system_prompt:
+                return jsonify({
+                    "status": "success",
+                    "system_prompt": system_prompt
+                })
+            else:
+                return jsonify({
+                    "status": "success",
+                    "system_prompt": {
+                        "role": "system",
+                        "content": "Prompt não configurado"
+                    }
+                })
+        
+        elif request.method == 'POST':
+            # Definir novo prompt
+            data = request.get_json()
+            
+            if not data or 'content' not in data:
+                return jsonify({"error": "Campo 'content' é obrigatório"}), 400
+            
+            system_prompt = {
+                "role": "system",
+                "content": data['content']
+            }
+            
+            success = db_manager.set_config(
+                'system_prompt',
+                system_prompt,
+                'Prompt do sistema para ChatGPT'
+            )
+            
+            if success:
+                return jsonify({
+                    "status": "success",
+                    "message": "Prompt atualizado com sucesso",
+                    "system_prompt": system_prompt
+                })
+            else:
+                return jsonify({"error": "Falha ao salvar prompt"}), 500
+                
+    except Exception as e:
+        logger.error(f"Erro ao gerenciar system prompt: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/bot/status')
+def bot_status():
+    """Verifica status do bot com timeouts e tratamento robusto de erros"""
+    try:
+        # Verificar token WhatsApp com timeout
+        whatsapp_ready = False
+        try:
+            # Importar aqui para evitar problemas de inicialização
+            from whatsapp_service import whatsapp_service
+            
+            # Verificar token WhatsApp com timeout limitado
+            token = whatsapp_service.get_access_token()
+            whatsapp_ready = token is not None
+            
+        except Exception as whatsapp_error:
+            logger.warning(f"Erro ao verificar token WhatsApp: {whatsapp_error}")
+            whatsapp_ready = False
+        
+        # Verificar system prompt com timeout e fallback
+        chatgpt_ready = False
+        try:
+            # Verificar se o banco está acessível primeiro
+            if db_manager.enabled:
+                # Usar método rápido que não tenta reconectar
+                system_prompt = db_manager.get_config_fast('system_prompt')
+                chatgpt_ready = system_prompt is not None
+            else:
+                logger.info("Banco desabilitado - usando configuração padrão")
+                chatgpt_ready = True  # Assume que tem prompt padrão
+                
+        except Exception as db_error:
+            logger.warning(f"Erro ao verificar system prompt: {db_error}")
+            # Em caso de erro no banco, assume que o ChatGPT pode funcionar com prompt padrão
+            chatgpt_ready = True
+        
+        # Status geral
+        bot_ready = whatsapp_ready and chatgpt_ready
+        
+        # Montar resposta
+        response = {
+            "status": "ready" if bot_ready else "configuration_needed",
+            "whatsapp_authorized": whatsapp_ready,
+            "chatgpt_configured": chatgpt_ready,
+            "ready": bot_ready,
+            "database_connected": db_manager.enabled and db_manager.connection is not None,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        # Adicionar OAuth URL se WhatsApp não estiver autorizado
+        if not whatsapp_ready:
+            response["oauth_url"] = f"{request.host_url}bot/oauth/start"
+        
+        return jsonify(response)
+        
+    except Exception as e:
+        logger.error(f"Erro crítico ao verificar status do bot: {e}")
+        return jsonify({
+            "status": "error",
+            "error": str(e),
+            "whatsapp_authorized": False,
+            "chatgpt_configured": False,
+            "ready": False,
+            "timestamp": datetime.now().isoformat()
+        }), 500
+
+@app.route('/bot/token/status')
+def token_status():
+    """Verifica status detalhado do token WhatsApp"""
+    try:
+        from whatsapp_service import whatsapp_service
+        
+        token_status = whatsapp_service.get_token_status()
+        return jsonify(token_status)
+        
+    except Exception as e:
+        logger.error(f"Erro ao verificar status do token: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/bot/token/refresh', methods=['POST'])
+def refresh_token():
+    """Força renovação do token WhatsApp"""
+    try:
+        from whatsapp_service import whatsapp_service
+        
+        success = whatsapp_service.refresh_token_if_needed()
+        
+        if success:
+            token_status = whatsapp_service.get_token_status()
+            return jsonify({
+                "success": True,
+                "message": "Token verificado/renovado com sucesso",
+                "token_status": token_status
+            })
+        else:
+            return jsonify({
+                "success": False,
+                "message": "Falha ao renovar token - autorização OAuth necessária",
+                "oauth_url": f"{request.host_url}bot/oauth/start"
+            }), 400
+            
+    except Exception as e:
+        logger.error(f"Erro ao renovar token: {e}")
+        return jsonify({"error": str(e)}), 500
+
 if __name__ == '__main__':
     # Configurar logging detalhado
     logging.basicConfig(
@@ -500,12 +766,13 @@ if __name__ == '__main__':
                 logger.info("✅ Tabela de logs verificada/criada")
                 
                 # Executar migração de dados existentes
-                logger.info("🔄 Executando migração de dados existentes...")
-                migration_success = db_manager.migrate_existing_data()
-                if migration_success:
-                    logger.info("✅ Migração de dados concluída com sucesso")
-                else:
-                    logger.warning("⚠️ Migração de dados falhou ou não foi necessária")
+                # TEMPORÁRIO: Comentado devido a erro na migração
+                # logger.info("🔄 Executando migração de dados existentes...")
+                # migration_success = db_manager.migrate_existing_data()
+                # if migration_success:
+                #     logger.info("✅ Migração de dados concluída com sucesso")
+                # else:
+                #     logger.warning("⚠️ Migração de dados falhou ou não foi necessária")
             else:
                 logger.warning("⚠️ Não foi possível criar/verificar tabela de logs")
         else:

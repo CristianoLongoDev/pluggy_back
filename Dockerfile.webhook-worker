@@ -44,6 +44,9 @@ COPY webhook_worker.py .
 COPY rabbitmq_manager.py .
 COPY database.py .
 COPY config.py .
+COPY chatgpt_service.py .
+COPY whatsapp_service.py .
+COPY whatsapp_token_manager.py .
 
 # Criar diretório para logs com permissões adequadas
 RUN mkdir -p /tmp && \

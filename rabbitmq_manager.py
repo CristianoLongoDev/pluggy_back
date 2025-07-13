@@ -18,6 +18,9 @@ class RabbitMQManager:
         self.enabled = RABBITMQ_ENABLED
         self._lock = threading.Lock()
         self.queues = [WEBHOOK_QUEUE, MESSAGE_QUEUE, STATUS_QUEUE, ERROR_QUEUE]
+        self._last_status_check = 0
+        self._status_cache = None
+        self._status_cache_duration = 5  # Cache por 5 segundos
         
     def _get_connection_params(self):
         """Retorna os parâmetros de conexão do RabbitMQ"""
@@ -154,13 +157,13 @@ class RabbitMQManager:
         
         # Escolher fila baseada no tipo de evento
         if event_type in ['message_received', 'webhook_received']:
-            queue = WEBHOOK_QUEUE  # Mensagens novas vão para webhook_messages
+            queue = WEBHOOK_QUEUE  # Mensagens vão para webhook_messages
         elif event_type in ['status_update']:
             queue = STATUS_QUEUE
         elif event_type in ['webhook_error', 'webhook_critical_error']:
             queue = ERROR_QUEUE
         else:
-            queue = WEBHOOK_QUEUE
+            queue = WEBHOOK_QUEUE  # Padrão para webhook_messages
             
         return self.publish_message(queue, message)
     
@@ -219,30 +222,73 @@ class RabbitMQManager:
             logger.error(f"❌ Erro ao consumir mensagens da fila '{queue_name}': {e}")
             return False
     
-    def get_queue_info(self, queue_name: str) -> Optional[Dict[str, Any]]:
-        """Retorna informações sobre uma fila"""
-        try:
-            if not self._ensure_connection():
-                return None
+    def get_queue_info(self, queue_name: str, max_retries=2) -> Optional[Dict[str, Any]]:
+        """Retorna informações sobre uma fila com retry logic"""
+        for attempt in range(max_retries + 1):
+            try:
+                # Usar lock para evitar concorrência
+                with self._lock:
+                    if not self._ensure_connection():
+                        logger.warning(f"⚠️ Sem conexão RabbitMQ - tentativa {attempt + 1}/{max_retries + 1}")
+                        if attempt == max_retries:
+                            return None
+                        time.sleep(0.1)  # Pequena pausa antes de tentar novamente
+                        continue
+                    
+                    # Verificar se o canal ainda está aberto
+                    if self.channel.is_closed:
+                        logger.warning(f"⚠️ Canal fechado - tentativa {attempt + 1}/{max_retries + 1}")
+                        if attempt == max_retries:
+                            return None
+                        # Tentar reconectar
+                        if not self.connect():
+                            continue
                 
-            method = self.channel.queue_declare(queue=queue_name, passive=True)
-            return {
-                'queue': queue_name,
-                'message_count': method.method.message_count,
-                'consumer_count': method.method.consumer_count
-            }
-        except Exception as e:
-            logger.error(f"❌ Erro ao obter informações da fila '{queue_name}': {e}")
-            return None
+                    # Tentar obter info da fila
+                    method = self.channel.queue_declare(queue=queue_name, passive=True)
+                    return {
+                        'queue': queue_name,
+                        'message_count': method.method.message_count,
+                        'consumer_count': method.method.consumer_count
+                    }
+                    
+            except Exception as e:
+                error_msg = str(e)
+                if "Channel is closing" in error_msg or "Connection is closed" in error_msg:
+                    logger.warning(f"⚠️ Canal/conexão fechada - tentativa {attempt + 1}/{max_retries + 1}")
+                    # Forçar reconexão
+                    try:
+                        self.disconnect()
+                    except:
+                        pass
+                    if attempt < max_retries:
+                        time.sleep(0.2)  # Pausa maior para reconexão
+                        continue
+                else:
+                    logger.error(f"❌ Erro ao obter informações da fila '{queue_name}': {e}")
+                
+                if attempt == max_retries:
+                    return None
+        
+        return None
     
     def get_status(self) -> Dict[str, Any]:
-        """Retorna o status do RabbitMQ e suas filas"""
+        """Retorna o status do RabbitMQ e suas filas com cache"""
         if not self.enabled:
             return {'status': 'disabled'}
             
+        # Verificar cache
+        current_time = time.time()
+        if (self._status_cache and 
+            current_time - self._last_status_check < self._status_cache_duration):
+            return self._status_cache
+            
         try:
+            # Verificação básica de conectividade
             if not self._ensure_connection():
-                return {'status': 'disconnected'}
+                self._status_cache = {'status': 'disconnected'}
+                self._last_status_check = current_time
+                return self._status_cache
             
             status = {
                 'status': 'connected',
@@ -251,16 +297,38 @@ class RabbitMQManager:
                 'queues': {}
             }
             
+            # Obter informações das filas de forma resiliente
             for queue_name in self.queues:
-                queue_info = self.get_queue_info(queue_name)
-                if queue_info:
-                    status['queues'][queue_name] = queue_info
-                    
+                try:
+                    queue_info = self.get_queue_info(queue_name)
+                    if queue_info:
+                        status['queues'][queue_name] = queue_info
+                    else:
+                        status['queues'][queue_name] = {
+                            'queue': queue_name,
+                            'message_count': 'unknown',
+                            'consumer_count': 'unknown',
+                            'status': 'error'
+                        }
+                except Exception as e:
+                    logger.warning(f"⚠️ Erro ao obter info da fila '{queue_name}': {e}")
+                    status['queues'][queue_name] = {
+                        'queue': queue_name,
+                        'message_count': 'error',
+                        'consumer_count': 'error',
+                        'status': 'error'
+                    }
+            
+            # Cache do resultado
+            self._status_cache = status
+            self._last_status_check = current_time
             return status
             
         except Exception as e:
             logger.error(f"❌ Erro ao obter status do RabbitMQ: {e}")
-            return {'status': 'error', 'error': str(e)}
+            self._status_cache = {'status': 'error', 'error': str(e)}
+            self._last_status_check = current_time
+            return self._status_cache
 
 # Instância global do gerenciador RabbitMQ
 rabbitmq_manager = RabbitMQManager() 

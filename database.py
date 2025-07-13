@@ -160,6 +160,21 @@ class DatabaseManager:
             cursor.execute(create_contacts_table_query)
             logger.info("Tabela contacts verificada/criada com sucesso")
             
+            # Criar tabela config
+            create_config_table_query = """
+            CREATE TABLE IF NOT EXISTS config (
+                id VARCHAR(50) PRIMARY KEY,
+                value JSON NOT NULL,
+                description VARCHAR(255) NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                INDEX idx_created_at (created_at)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+            """
+            
+            cursor.execute(create_config_table_query)
+            logger.info("Tabela config verificada/criada com sucesso")
+            
             connection.commit()
             cursor.close()
             
@@ -257,8 +272,18 @@ class DatabaseManager:
             
             for record in records:
                 try:
-                    # Extrair dados do JSON
-                    event_data = json.loads(record['event_data'])
+                    # Extrair dados do JSON - verificar se já é dict ou se é string JSON
+                    event_data = record['event_data']
+                    
+                    # Se é string, fazer parse JSON
+                    if isinstance(event_data, str):
+                        event_data = json.loads(event_data)
+                    # Se já é dict, usar diretamente
+                    elif isinstance(event_data, dict):
+                        pass
+                    else:
+                        logger.warning(f"Tipo de dados desconhecido para record {record['id']}: {type(event_data)}")
+                        continue
                     
                     message_type = event_data.get('type')
                     id_contact = event_data.get('from')
@@ -266,11 +291,23 @@ class DatabaseManager:
                     
                     # Extrair conteúdo da mensagem baseado no tipo
                     if message_type == 'text':
-                        message_content = event_data.get('text')
+                        text_data = event_data.get('text')
+                        if isinstance(text_data, dict):
+                            message_content = text_data.get('body')
+                        else:
+                            message_content = text_data
                     elif message_type == 'document':
-                        message_content = event_data.get('filename')
+                        doc_data = event_data.get('document')
+                        if isinstance(doc_data, dict):
+                            message_content = doc_data.get('filename')
+                        else:
+                            message_content = event_data.get('filename')
                     elif message_type == 'image':
-                        message_content = event_data.get('caption')
+                        img_data = event_data.get('image')
+                        if isinstance(img_data, dict):
+                            message_content = img_data.get('caption')
+                        else:
+                            message_content = event_data.get('caption')
                     elif message_type == 'audio':
                         message_content = f"Audio message - {event_data.get('id', 'unknown')}"
                     
@@ -278,8 +315,11 @@ class DatabaseManager:
                     cursor.execute(update_query, (message_type, message_content, id_contact, record['id']))
                     migrated_count += 1
                     
-                except (json.JSONDecodeError, KeyError) as e:
+                except (json.JSONDecodeError, KeyError, AttributeError) as e:
                     logger.warning(f"Erro ao processar registro {record['id']}: {e}")
+                    continue
+                except Exception as e:
+                    logger.warning(f"Erro geral ao processar registro {record['id']}: {e}")
                     continue
             
             connection.commit()
@@ -335,6 +375,130 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"Erro geral ao inserir/atualizar contato: {e}")
             return False
+            
+    def get_config(self, config_id):
+        """Busca uma configuração por ID"""
+        if not self.enabled:
+            logger.warning("Banco de dados desabilitado")
+            return None
+            
+        connection = self._get_connection()
+        if not connection:
+            logger.warning("Não foi possível conectar ao banco")
+            return None
+            
+        try:
+            cursor = connection.cursor(dictionary=True)
+            
+            query = "SELECT value FROM config WHERE id = %s"
+            cursor.execute(query, (config_id,))
+            result = cursor.fetchone()
+            cursor.close()
+            
+            if result:
+                return json.loads(result['value']) if isinstance(result['value'], str) else result['value']
+            return None
+            
+        except Error as e:
+            logger.error(f"Erro ao buscar configuração {config_id}: {e}")
+            return None
+    
+    def get_config_fast(self, config_id):
+        """Busca uma configuração por ID sem tentar reconectar (para verificações rápidas)"""
+        if not self.enabled:
+            return None
+            
+        # Verifica apenas se há conexão existente e ativa
+        try:
+            if (self.connection and 
+                hasattr(self.connection, 'is_connected') and 
+                self.connection.is_connected()):
+                
+                cursor = self.connection.cursor(dictionary=True)
+                query = "SELECT value FROM config WHERE id = %s"
+                cursor.execute(query, (config_id,))
+                result = cursor.fetchone()
+                cursor.close()
+                
+                if result:
+                    return json.loads(result['value']) if isinstance(result['value'], str) else result['value']
+            
+            return None
+            
+        except Exception as e:
+            logger.warning(f"Erro rápido ao buscar configuração {config_id}: {e}")
+            return None
+            
+    def set_config(self, config_id, value, description=None):
+        """Define uma configuração"""
+        if not self.enabled:
+            logger.warning("Banco de dados desabilitado")
+            return False
+            
+        connection = self._get_connection()
+        if not connection:
+            logger.warning("Não foi possível conectar ao banco")
+            return False
+            
+        try:
+            cursor = connection.cursor()
+            
+            upsert_query = """
+            INSERT INTO config (id, value, description) 
+            VALUES (%s, %s, %s) 
+            ON DUPLICATE KEY UPDATE 
+                value = VALUES(value),
+                description = COALESCE(VALUES(description), description),
+                updated_at = CURRENT_TIMESTAMP
+            """
+            
+            json_value = json.dumps(value, ensure_ascii=False)
+            cursor.execute(upsert_query, (config_id, json_value, description))
+            connection.commit()
+            cursor.close()
+            
+            logger.info(f"Configuração {config_id} salva com sucesso")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Erro ao salvar configuração {config_id}: {e}")
+            return False
+            
+    def get_conversation_context(self, contact_id, limit=10):
+        """Busca as últimas mensagens de um contato no dia atual"""
+        if not self.enabled:
+            logger.warning("Banco de dados desabilitado")
+            return []
+            
+        connection = self._get_connection()
+        if not connection:
+            logger.warning("Não foi possível conectar ao banco")
+            return []
+            
+        try:
+            cursor = connection.cursor(dictionary=True)
+            
+            query = """
+            SELECT type, message, event_type, created_at 
+            FROM logs 
+            WHERE id_contact = %s 
+              AND DATE(created_at) = CURDATE()
+              AND type = 'text'
+              AND message IS NOT NULL
+            ORDER BY created_at DESC 
+            LIMIT %s
+            """
+            
+            cursor.execute(query, (contact_id, limit))
+            messages = cursor.fetchall()
+            cursor.close()
+            
+            # Inverter para ordem cronológica (mais antiga primeiro)
+            return list(reversed(messages))
+            
+        except Exception as e:
+            logger.error(f"Erro ao buscar contexto da conversa para {contact_id}: {e}")
+            return []
             
     def save_webhook_event(self, event_type, event_data):
         """Salva um evento do webhook no banco"""

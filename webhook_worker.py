@@ -114,19 +114,56 @@ class WebhookWorker:
         
         logger.info(f"💬 Processando mensagem {message_type} de {from_number} (ID: {message_id})")
         
-        # Aqui você pode implementar sua lógica de negócio:
-        # - Resposta automática
-        # - Integração com CRM
-        # - Análise de conteúdo
-        # - Etc.
-        
+        # CHATGPT BOT: Processar apenas mensagens de texto
         if message_type == 'text':
             text_body = event_data.get('text', {}).get('body', '')
             logger.info(f"📝 Conteúdo da mensagem: {text_body[:100]}...")
             
-            # Exemplo: resposta automática para palavras-chave
-            if 'oi' in text_body.lower() or 'olá' in text_body.lower():
-                logger.info("👋 Mensagem de saudação detectada")
+            # Processar com ChatGPT
+            try:
+                self._process_chatgpt_response(from_number, text_body)
+            except Exception as e:
+                logger.error(f"Erro ao processar ChatGPT: {e}")
+        
+        else:
+            logger.info(f"📨 Tipo de mensagem {message_type} não processado pelo bot")
+            
+    def _process_chatgpt_response(self, contact_id, message_text):
+        """Processa mensagem com ChatGPT e envia resposta"""
+        try:
+            # Importar serviços aqui para evitar problemas de inicialização
+            from chatgpt_service import chatgpt_service
+            from whatsapp_service import whatsapp_service
+            
+            logger.info(f"🤖 Processando mensagem com ChatGPT para {contact_id}")
+            
+            # Gerar resposta com ChatGPT
+            chatgpt_response = chatgpt_service.process_message(contact_id, message_text)
+            
+            if chatgpt_response:
+                logger.info(f"✅ ChatGPT respondeu: {chatgpt_response[:50]}...")
+                
+                # Enviar resposta via WhatsApp
+                sent = whatsapp_service.process_outgoing_message(contact_id, chatgpt_response)
+                
+                if sent:
+                    logger.info(f"📤 Resposta enviada com sucesso para {contact_id}")
+                else:
+                    logger.warning(f"⚠️ Falha ao enviar resposta para {contact_id}")
+            else:
+                logger.warning(f"⚠️ ChatGPT não gerou resposta para {contact_id}")
+                
+        except Exception as e:
+            logger.error(f"❌ Erro no processamento ChatGPT para {contact_id}: {e}")
+            # Em caso de erro, enviar mensagem padrão (opcional)
+            try:
+                from whatsapp_service import whatsapp_service
+                whatsapp_service.process_outgoing_message(
+                    contact_id, 
+                    "Desculpe, estou com dificuldades técnicas no momento. Tente novamente em alguns minutos."
+                )
+            except:
+                pass
     
     def _process_status_update(self, event_data):
         """Processa atualização de status"""

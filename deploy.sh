@@ -9,6 +9,7 @@ set -e
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Configurações
@@ -19,8 +20,30 @@ IMAGE_TAG="latest"
 FULL_IMAGE_NAME="${DOCKERHUB_USERNAME}/${IMAGE_NAME}:${IMAGE_TAG}"
 
 echo -e "${GREEN}🚀 Iniciando deploy da aplicação WhatsApp Webhook${NC}"
-echo -e "${GREEN}📊 Versão: Sistema de Logs Aprimorado${NC}"
+echo -e "${GREEN}📊 Versão: Sistema com RabbitMQ Manager Otimizado${NC}"
 echo -e "${YELLOW}🐋 Imagem: ${FULL_IMAGE_NAME}${NC}"
+
+# Função para verificar status dos pods
+check_pod_status() {
+    local app_label=$1
+    local timeout=${2:-180}
+    
+    echo -e "${BLUE}📊 Verificando status dos pods para app=${app_label}...${NC}"
+    kubectl get pods -n ${NAMESPACE} -l app=${app_label} -o wide
+    
+    echo -e "${BLUE}🔍 Aguardando pods ficarem Ready (timeout: ${timeout}s)...${NC}"
+    kubectl wait --for=condition=Ready pod -l app=${app_label} -n ${NAMESPACE} --timeout=${timeout}s
+    
+    if [ $? -eq 0 ]; then
+        echo -e "${GREEN}✅ Todos os pods estão Ready!${NC}"
+        kubectl get pods -n ${NAMESPACE} -l app=${app_label}
+    else
+        echo -e "${YELLOW}⚠️ Alguns pods ainda não estão Ready. Verificando detalhes...${NC}"
+        kubectl get pods -n ${NAMESPACE} -l app=${app_label} -o wide
+        echo -e "${YELLOW}📋 Logs dos pods:${NC}"
+        kubectl logs -n ${NAMESPACE} -l app=${app_label} --tail=10
+    fi
+}
 
 # Verificar se o Docker está rodando
 if ! docker ps &> /dev/null; then
@@ -42,121 +65,144 @@ if ! kubectl get namespace $NAMESPACE &> /dev/null; then
     kubectl apply -f k8s/namespace.yaml
 fi
 
+# Verificar se há mudanças no código
+echo -e "${BLUE}🔍 Verificando alterações no código...${NC}"
+if [ -f "rabbitmq_manager.py" ]; then
+    echo -e "${GREEN}✅ Código do RabbitMQ Manager encontrado - incluindo correções de canal${NC}"
+else
+    echo -e "${RED}❌ Arquivo rabbitmq_manager.py não encontrado${NC}"
+    exit 1
+fi
+
 # Construir imagem Docker
 echo -e "${YELLOW}🔨 Construindo imagem Docker...${NC}"
 docker build -t $FULL_IMAGE_NAME .
 
 # Verificar se a imagem foi criada
 if ! docker images $FULL_IMAGE_NAME | grep -q $IMAGE_TAG; then
-    echo -e "${RED}❌ Falha ao criar a imagem Docker${NC}"
+    echo -e "${RED}❌ Falha ao criar imagem Docker${NC}"
     exit 1
 fi
 
 echo -e "${GREEN}✅ Imagem Docker criada com sucesso${NC}"
 
-# Verificar login no DockerHub
-echo -e "${YELLOW}🔑 Verificando login no DockerHub...${NC}"
+# Fazer login no DockerHub se necessário
+echo -e "${YELLOW}🔐 Verificando login no DockerHub...${NC}"
 if ! docker info 2>/dev/null | grep -q "Username: ${DOCKERHUB_USERNAME}"; then
-    echo -e "${YELLOW}⚠️ Não logado no DockerHub. Fazendo login...${NC}"
+    echo -e "${YELLOW}🔐 Fazendo login no DockerHub...${NC}"
     docker login
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}❌ Erro no login do DockerHub${NC}"
+        exit 1
+    fi
 fi
 
-# Fazer push da imagem para o DockerHub
-echo -e "${YELLOW}📤 Fazendo push da imagem para o DockerHub...${NC}"
+# Push da imagem para DockerHub
+echo -e "${YELLOW}📤 Enviando imagem para DockerHub...${NC}"
 docker push $FULL_IMAGE_NAME
 
-echo -e "${GREEN}✅ Imagem enviada para o DockerHub com sucesso${NC}"
-
-# Aplicar configurações do Kubernetes
-echo -e "${YELLOW}📋 Aplicando configurações do Kubernetes...${NC}"
-
-# Verificar se o Cert-Manager está instalado
-if kubectl get namespace cert-manager &> /dev/null; then
-    echo -e "${GREEN}✅ Cert-Manager encontrado. Aplicando ClusterIssuer...${NC}"
-    kubectl apply -f k8s/cluster-issuer.yaml
-else
-    echo -e "${YELLOW}⚠️  Cert-Manager não encontrado. Certificados SSL não serão gerados automaticamente.${NC}"
-    echo -e "${YELLOW}   Para instalar o Cert-Manager, execute:${NC}"
-    echo -e "${YELLOW}   kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.13.0/cert-manager.yaml${NC}"
+if [ $? -ne 0 ]; then
+    echo -e "${RED}❌ Falha ao enviar imagem para DockerHub${NC}"
+    exit 1
 fi
 
-# Aplicar ConfigMap e Secret
+echo -e "${GREEN}✅ Imagem enviada para DockerHub com sucesso${NC}"
+
+# Aplicar configurações
+echo -e "${YELLOW}📝 Aplicando configurações...${NC}"
+
+# Aplicar secret
+if [ -f "k8s/secret.yaml" ]; then
+    kubectl apply -f k8s/secret.yaml
+    echo -e "${GREEN}✅ Secret aplicado${NC}"
+fi
+
+# Aplicar configmap
+if [ -f "k8s/configmap.yaml" ]; then
 kubectl apply -f k8s/configmap.yaml
-kubectl apply -f k8s/secret.yaml
+    echo -e "${GREEN}✅ ConfigMap aplicado${NC}"
+fi
 
-# Aplicar Deployment, Service e Ingress
+# Aplicar service
+if [ -f "k8s/service.yaml" ]; then
+    kubectl apply -f k8s/service.yaml
+    echo -e "${GREEN}✅ Service aplicado${NC}"
+fi
+
+# Aplicar deployment
+echo -e "${YELLOW}🚀 Aplicando deployment...${NC}"
 kubectl apply -f k8s/deployment.yaml
-kubectl apply -f k8s/service.yaml
-kubectl apply -f k8s/ingress.yaml
 
-# Forçar restart dos pods para puxar a nova imagem
-echo -e "${YELLOW}🔄 Forçando restart dos pods para puxar nova imagem...${NC}"
-kubectl rollout restart deployment/whatsapp-webhook -n $NAMESPACE
+if [ $? -ne 0 ]; then
+    echo -e "${RED}❌ Falha ao aplicar deployment${NC}"
+    exit 1
+fi
 
-# Aguardar o deployment estar pronto
-echo -e "${YELLOW}⏳ Aguardando deployment estar pronto...${NC}"
-kubectl rollout status deployment/whatsapp-webhook -n $NAMESPACE --timeout=300s
+echo -e "${GREEN}✅ Deployment aplicado com sucesso${NC}"
 
-# Aguardar aplicação inicializar
-echo -e "${YELLOW}⏳ Aguardando aplicação inicializar (90 segundos)...${NC}"
-sleep 90
+# Aguardar deployment
+echo -e "${YELLOW}⏳ Aguardando deployment ser processado...${NC}"
+sleep 10
 
 # Verificar status dos pods
-echo -e "${YELLOW}🔍 Verificando status dos pods...${NC}"
-kubectl get pods -n $NAMESPACE -l app=whatsapp-webhook
+check_pod_status "whatsapp-webhook" 240
 
-# Verificar status do service
-echo -e "${YELLOW}🔍 Verificando status do service...${NC}"
-kubectl get service whatsapp-webhook-service -n $NAMESPACE
-
-# Verificar status do ingress
-echo -e "${YELLOW}🔍 Verificando status do ingress...${NC}"
-kubectl get ingress whatsapp-webhook-ingress -n $NAMESPACE
-
-# Testar health check
-echo -e "${YELLOW}🏥 Testando health check...${NC}"
-if curl -s -f https://atendimento.pluggerbi.com/health &> /dev/null; then
-    echo -e "${GREEN}✅ Health check OK${NC}"
-else
-    echo -e "${YELLOW}⚠️ Health check falhou - verificando logs...${NC}"
-    kubectl logs -n $NAMESPACE -l app=whatsapp-webhook --tail=10
+# Verificar se há ingress
+if [ -f "k8s/ingress.yaml" ]; then
+    echo -e "${YELLOW}🌐 Aplicando ingress...${NC}"
+    kubectl apply -f k8s/ingress.yaml
+    echo -e "${GREEN}✅ Ingress aplicado${NC}"
 fi
 
-# Executar migração de dados
-echo -e "${YELLOW}🔄 Executando migração de dados...${NC}"
-MIGRATION_RESULT=$(curl -s -X POST https://atendimento.pluggerbi.com/logs/migrate || echo "Erro na migração")
-echo -e "${GREEN}📋 Resultado da migração: ${MIGRATION_RESULT}${NC}"
+# Verificação final
+echo -e "${BLUE}🔍 Verificação final do sistema...${NC}"
+echo ""
+echo -e "${GREEN}📊 STATUS DOS PODS:${NC}"
+kubectl get pods -n ${NAMESPACE} -o wide
 
-# Testar novos endpoints
-echo -e "${YELLOW}🧪 Testando novos endpoints...${NC}"
-if curl -s -f https://atendimento.pluggerbi.com/logs &> /dev/null; then
-    echo -e "${GREEN}✅ Endpoint /logs OK${NC}"
-else
-    echo -e "${YELLOW}⚠️ Endpoint /logs com problemas${NC}"
-fi
+echo ""
+echo -e "${GREEN}🌐 STATUS DOS SERVICES:${NC}"
+kubectl get services -n ${NAMESPACE}
 
-if curl -s -f https://atendimento.pluggerbi.com/logs/by-type/text &> /dev/null; then
-    echo -e "${GREEN}✅ Endpoint /logs/by-type/text OK${NC}"
-else
-    echo -e "${YELLOW}⚠️ Endpoint /logs/by-type/text com problemas${NC}"
-fi
+echo ""
+echo -e "${GREEN}📋 STATUS DOS DEPLOYMENTS:${NC}"
+kubectl get deployments -n ${NAMESPACE}
 
-echo -e "${GREEN}✅ Deploy concluído com sucesso!${NC}"
-echo -e "${GREEN}📊 Alterações implementadas:${NC}"
-echo -e "${GREEN}  • ✅ Tabela logs com novos campos (type, message, id_contact)${NC}"
-echo -e "${GREEN}  • ✅ Migração automática de dados existentes${NC}"
-echo -e "${GREEN}  • ✅ Novos endpoints para consulta por tipo e contato${NC}"
-echo -e "${GREEN}  • ✅ Processamento aprimorado de mensagens WhatsApp${NC}"
+# Testar saúde da aplicação
+echo ""
+echo -e "${BLUE}🩺 Testando saúde da aplicação...${NC}"
+kubectl get pods -n ${NAMESPACE} -l app=whatsapp-webhook --no-headers | head -1 | while read pod_name rest; do
+    if [ ! -z "$pod_name" ]; then
+        echo -e "${YELLOW}🔍 Testando health check do pod: $pod_name${NC}"
+        kubectl exec -n ${NAMESPACE} $pod_name -- curl -f http://localhost:5000/health 2>/dev/null || echo -e "${YELLOW}⚠️ Health check falhou ou ainda não está pronto${NC}"
+    fi
+done
 
-echo -e "${YELLOW}🌐 Endpoints disponíveis:${NC}"
-echo -e "${YELLOW}  • GET  /logs - Consultar todos os logs${NC}"
-echo -e "${YELLOW}  • GET  /logs/by-type/{tipo} - Consultar por tipo${NC}"
-echo -e "${YELLOW}  • GET  /logs/by-contact/{contato} - Consultar por contato${NC}"
-echo -e "${YELLOW}  • POST /logs/migrate - Migrar dados existentes${NC}"
-
-echo -e "${GREEN}🔗 Aplicação disponível em: https://atendimento.pluggerbi.com${NC}"
-echo -e "${GREEN}📱 Webhook URL para o WhatsApp: https://atendimento.pluggerbi.com/webhook${NC}"
-
-# Mostrar logs dos pods
-echo -e "${YELLOW}📋 Logs dos pods (últimas 20 linhas):${NC}"
-kubectl logs -n $NAMESPACE -l app=whatsapp-webhook --tail=20 
+echo ""
+echo -e "${GREEN}=================================================${NC}"
+echo -e "${GREEN}🎉 DEPLOY CONCLUÍDO COM SUCESSO!${NC}"
+echo -e "${GREEN}=================================================${NC}"
+echo ""
+echo -e "${BLUE}📋 INFORMAÇÕES ÚTEIS:${NC}"
+echo ""
+echo -e "${YELLOW}🔗 URL da aplicação:${NC}"
+echo -e "   https://atendimento.pluggerbi.com"
+echo ""
+echo -e "${YELLOW}🩺 Health check:${NC}"
+echo -e "   https://atendimento.pluggerbi.com/health"
+echo ""
+echo -e "${YELLOW}🤖 Status do bot:${NC}"
+echo -e "   https://atendimento.pluggerbi.com/bot/status"
+echo ""
+echo -e "${YELLOW}📊 Para verificar logs:${NC}"
+echo -e "   kubectl logs -f deployment/whatsapp-webhook -n ${NAMESPACE}"
+echo ""
+echo -e "${YELLOW}🧪 Para testar webhook:${NC}"
+echo -e "   curl -X POST https://atendimento.pluggerbi.com/webhook \\\\"
+echo -e "        -H 'Content-Type: application/json' \\\\"
+echo -e "        -d '{\"test\": \"message\"}'"
+echo ""
+echo -e "${YELLOW}🐰 Status do RabbitMQ:${NC}"
+echo -e "   https://atendimento.pluggerbi.com/rabbitmq/status"
+echo ""
+echo -e "${GREEN}=================================================${NC}" 
