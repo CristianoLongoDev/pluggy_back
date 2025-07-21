@@ -6,7 +6,7 @@ import time
 from typing import Optional, Dict, Any, Callable
 from config import (
     RABBITMQ_HOST, RABBITMQ_PORT, RABBITMQ_USER, RABBITMQ_PASSWORD, RABBITMQ_ENABLED,
-    WEBHOOK_QUEUE, MESSAGE_QUEUE, STATUS_QUEUE, ERROR_QUEUE
+    WEBHOOK_QUEUE, MESSAGE_QUEUE, STATUS_QUEUE, ERROR_QUEUE, CHATGPT_DELAY_QUEUE
 )
 
 logger = logging.getLogger(__name__)
@@ -17,7 +17,7 @@ class RabbitMQManager:
         self.channel = None
         self.enabled = RABBITMQ_ENABLED
         self._lock = threading.Lock()
-        self.queues = [WEBHOOK_QUEUE, MESSAGE_QUEUE, STATUS_QUEUE, ERROR_QUEUE]
+        self.queues = [WEBHOOK_QUEUE, MESSAGE_QUEUE, STATUS_QUEUE, ERROR_QUEUE, CHATGPT_DELAY_QUEUE]
         self._last_status_check = 0
         self._status_cache = None
         self._status_cache_duration = 5  # Cache por 5 segundos
@@ -145,6 +145,16 @@ class RabbitMQManager:
                 except:
                     pass
                 return False
+    
+    def publish_with_delay(self, message: Dict[Any, Any], delay_seconds: int = 10) -> bool:
+        """Publica uma mensagem com delay na fila de ChatGPT"""
+        import time
+        
+        # Adicionar timestamp de quando deve ser processada
+        message['scheduled_time'] = time.time() + delay_seconds
+        message['delay_seconds'] = delay_seconds
+        
+        return self.publish_message(CHATGPT_DELAY_QUEUE, message)
     
     def publish_webhook_event(self, event_type: str, event_data: Dict[Any, Any]) -> bool:
         """Publica um evento do webhook na fila apropriada"""

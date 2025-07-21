@@ -1,0 +1,42 @@
+# Dockerfile para Delay Worker
+FROM python:3.11-slim
+
+# Criar usuário não-root para segurança
+RUN groupadd -g 1001 appgroup && \
+    useradd -u 1001 -g appgroup -m -s /bin/bash appuser
+
+# Definir diretório de trabalho
+WORKDIR /app
+
+# Instalar dependências do sistema
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    gcc \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copiar arquivo de requirements
+COPY requirements-worker.txt .
+
+# Instalar dependências Python
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements-worker.txt
+
+# Copiar arquivos da aplicação
+COPY chatgpt_delay_worker.py .
+COPY webhook_worker.py .
+COPY database.py .
+COPY rabbitmq_manager.py .
+COPY chatgpt_service.py .
+COPY whatsapp_service.py .
+COPY whatsapp_token_manager.py .
+COPY config.py .
+
+# Criar arquivo de log temporário
+RUN touch /tmp/chatgpt_delay_worker.log && \
+    chown -R appuser:appgroup /app /tmp
+
+# Mudar para usuário não-root
+USER appuser
+
+# Comando para executar o worker de delay
+CMD ["python", "chatgpt_delay_worker.py"] 

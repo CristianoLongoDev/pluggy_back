@@ -5,6 +5,7 @@ import threading
 import time
 from mysql.connector import Error
 from config import DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD, DB_ENABLED
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -483,7 +484,7 @@ class DatabaseManager:
             FROM logs 
             WHERE id_contact = %s 
               AND DATE(created_at) = CURDATE()
-              AND type = 'text'
+              AND event_type IN ('message_received', 'message_sent')
               AND message IS NOT NULL
             ORDER BY created_at DESC 
             LIMIT %s
@@ -699,6 +700,215 @@ class DatabaseManager:
             return "connected"
         else:
             return "disconnected"
+
+    def get_active_conversation(self, contact_id):
+        """Busca a conversa ativa de um contato. Retorna o registro ou None."""
+        if not self.enabled:
+            return None
+        connection = self._get_connection()
+        if not connection:
+            return None
+        try:
+            cursor = connection.cursor(dictionary=True)
+            query = """
+                SELECT * FROM conversation
+                WHERE contact_id = %s AND status = 'active'
+                ORDER BY started_at DESC LIMIT 1
+            """
+            cursor.execute(query, (contact_id,))
+            result = cursor.fetchone()
+            cursor.close()
+            return result
+        except Exception as e:
+            logger.error(f"Erro ao buscar conversa ativa: {e}")
+            return None
+
+    def create_conversation(self, contact_id):
+        """Cria uma nova conversa ativa para o contato e retorna o id."""
+        if not self.enabled:
+            return None
+        connection = self._get_connection()
+        if not connection:
+            return None
+        try:
+            cursor = connection.cursor()
+            query = """
+                INSERT INTO conversation (contact_id, status, started_at)
+                VALUES (%s, 'active', NOW())
+            """
+            cursor.execute(query, (contact_id,))
+            conversation_id = cursor.lastrowid
+            connection.commit()
+            cursor.close()
+            return conversation_id
+        except Exception as e:
+            logger.error(f"Erro ao criar conversa: {e}")
+            return None
+
+    def close_conversation(self, conversation_id):
+        """Fecha uma conversa (status = closed, define ended_at)."""
+        if not self.enabled:
+            return False
+        connection = self._get_connection()
+        if not connection:
+            return False
+        try:
+            cursor = connection.cursor()
+            query = """
+                UPDATE conversation SET status = 'closed', ended_at = NOW()
+                WHERE id = %s
+            """
+            cursor.execute(query, (conversation_id,))
+            connection.commit()
+            cursor.close()
+            return True
+        except Exception as e:
+            logger.error(f"Erro ao fechar conversa: {e}")
+            return False
+
+    def insert_conversation_message(self, conversation_id, message_text, sender, message_type, timestamp=None):
+        """Insere uma mensagem na tabela conversation_message."""
+        if not self.enabled:
+            return False
+        connection = self._get_connection()
+        if not connection:
+            return False
+        try:
+            cursor = connection.cursor()
+            query = """
+                INSERT INTO conversation_message (conversation_id, message_text, sender, message_type, timestamp)
+                VALUES (%s, %s, %s, %s, %s)
+            """
+            if not timestamp:
+                timestamp = datetime.now(timezone.utc)
+            cursor.execute(query, (conversation_id, message_text, sender, message_type, timestamp))
+            connection.commit()
+            cursor.close()
+            return True
+        except Exception as e:
+            logger.error(f"Erro ao inserir mensagem na conversa: {e}")
+            return False
+
+    def insert_conversation_attach(self, conversation_id, file_url, file_type, file_name=None):
+        """Insere um anexo na tabela conversation_attach."""
+        if not self.enabled:
+            return False
+        connection = self._get_connection()
+        if not connection:
+            return False
+        try:
+            cursor = connection.cursor()
+            if file_name is not None:
+                query = """
+                    INSERT INTO conversation_attach (conversation_id, file_url, file_type, file_name)
+                    VALUES (%s, %s, %s, %s)
+                """
+                cursor.execute(query, (conversation_id, file_url, file_type, file_name))
+            else:
+                query = """
+                    INSERT INTO conversation_attach (conversation_id, file_url, file_type)
+                    VALUES (%s, %s, %s)
+                """
+                cursor.execute(query, (conversation_id, file_url, file_type))
+            connection.commit()
+            cursor.close()
+            return True
+        except Exception as e:
+            logger.error(f"Erro ao inserir anexo na conversa: {e}")
+            return False
+
+    def get_conversation_messages(self, conversation_id, limit=10):
+        """Busca as últimas mensagens de uma conversa (ordem cronológica)."""
+        if not self.enabled:
+            return []
+        connection = self._get_connection()
+        if not connection:
+            return []
+        try:
+            cursor = connection.cursor(dictionary=True)
+            query = """
+                SELECT sender, message_text, message_type, timestamp
+                FROM conversation_message
+                WHERE conversation_id = %s
+                ORDER BY timestamp DESC
+                LIMIT %s
+            """
+            cursor.execute(query, (conversation_id, limit))
+            messages = cursor.fetchall()
+            cursor.close()
+            # Retornar em ordem cronológica (mais antiga primeiro)
+            return list(reversed(messages))
+        except Exception as e:
+            logger.error(f"Erro ao buscar mensagens da conversa: {e}")
+            return []
+
+    def get_last_user_messages(self, conversation_id, limit=1):
+        """Busca as últimas mensagens do usuário (sender='user') de uma conversa."""
+        if not self.enabled:
+            return []
+        connection = self._get_connection()
+        if not connection:
+            return []
+        try:
+            cursor = connection.cursor(dictionary=True)
+            query = """
+                SELECT sender, message_text, message_type, timestamp
+                FROM conversation_message
+                WHERE conversation_id = %s AND sender = 'user'
+                ORDER BY timestamp DESC
+                LIMIT %s
+            """
+            cursor.execute(query, (conversation_id, limit))
+            messages = cursor.fetchall()
+            cursor.close()
+            return messages
+        except Exception as e:
+            logger.error(f"Erro ao buscar mensagens do usuário da conversa: {e}")
+            return []
+
+    def get_contact(self, contact_id):
+        """Busca um contato pelo contact_id na tabela contacts."""
+        if not self.enabled:
+            return None
+        connection = self._get_connection()
+        if not connection:
+            return None
+        try:
+            cursor = connection.cursor(dictionary=True)
+            query = """
+                SELECT * FROM contacts WHERE id = %s
+            """
+            cursor.execute(query, (contact_id,))
+            contact = cursor.fetchone()
+            cursor.close()
+            return contact
+        except Exception as e:
+            logger.error(f"Erro ao buscar contato: {e}")
+            return None
+
+    def has_agent_response_for_contact(self, contact_id):
+        """Verifica se o contato já recebeu alguma resposta do agente em qualquer conversa."""
+        if not self.enabled:
+            return False
+        connection = self._get_connection()
+        if not connection:
+            return False
+        try:
+            cursor = connection.cursor()
+            query = """
+                SELECT 1
+                FROM conversation_message cm
+                JOIN conversation c ON cm.conversation_id = c.id
+                WHERE c.contact_id = %s AND cm.sender = 'agent'
+                LIMIT 1
+            """
+            cursor.execute(query, (contact_id,))
+            result = cursor.fetchone()
+            cursor.close()
+            return result is not None
+        except Exception as e:
+            logger.error(f"Erro ao verificar se contato já tem resposta do agente: {e}")
+            return False
 
 # Instância global do gerenciador de banco
 db_manager = DatabaseManager() 
