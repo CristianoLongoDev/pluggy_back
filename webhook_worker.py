@@ -49,6 +49,8 @@ class WebhookWorker:
     
     def process_webhook_message(self, message):
         """Processa uma mensagem genérica do webhook"""
+        start_time = time.time()
+        
         try:
             event_type = message.get('event_type', 'unknown')
             event_data = message.get('event_data', {})
@@ -56,159 +58,174 @@ class WebhookWorker:
             
             logger.info(f"📨 Processando evento: {event_type}")
             
-            # Salvar no banco de dados se disponível (logs antigos)
-            if db_manager.enabled:
-                success = db_manager.save_webhook_event(event_type, event_data)
-                if success:
-                    logger.info(f"💾 Evento {event_type} salvo no banco")
-                else:
-                    logger.warning(f"⚠️ Falha ao salvar evento {event_type} no banco")
-
-            # NOVO: Gravar na estrutura de conversa
-            if event_type in ('message_received', 'message_sent'):
-                logger.info(f"🔄 Processando {event_type} para gravar na estrutura de conversa...")
-                contact_id = None
-                message_text = None
-                message_type = None
-                sender = None
-                msg_timestamp = None
-                media_id = None
-                media_type = None
-                file_name = None
-                if event_type == 'message_received':
-                    contact_id = event_data.get('from')
-                    sender = 'user'
-                    message_type = event_data.get('type', 'unknown')
-                    if message_type == 'text':
-                        message_text = event_data.get('text', {}).get('body')
-                    elif message_type == 'document':
-                        doc = event_data.get('document', {})
-                        media_id = doc.get('id')
-                        media_type = doc.get('mime_type')
-                        file_name = doc.get('filename')
-                        # Só usar caption se existir e não for vazio
-                        caption = doc.get('caption')
-                        message_text = caption if caption and caption.strip() else None
-                    elif message_type == 'image':
-                        img = event_data.get('image', {})
-                        media_id = img.get('id')
-                        media_type = img.get('mime_type')
-                        file_name = img.get('filename') if 'filename' in img else None
-                        # Só usar caption se existir e não for vazio
-                        caption = img.get('caption')
-                        message_text = caption if caption and caption.strip() else None
-                    msg_timestamp = event_data.get('timestamp')
-                elif event_type == 'message_sent':
-                    contact_id = event_data.get('to')
-                    sender = 'agent'
-                    message_type = event_data.get('type', 'unknown')
-                    if message_type == 'text':
-                        message_text = event_data.get('text')
-                    msg_timestamp = event_data.get('timestamp')
-                
-                logger.info(f"📝 Extraído: contact_id={contact_id}, sender={sender}, message_text='{message_text[:50] if message_text else None}...'")
-                
-                # Converter timestamp se necessário
-                dt_timestamp = None
-                if msg_timestamp:
+            # Timeout para operações críticas (evita travamento total)
+            import signal
+            
+            def timeout_handler(signum, frame):
+                raise TimeoutError(f"Timeout no processamento de {event_type}")
+            
+            # Configurar timeout geral de 2 minutos para qualquer operação
+            signal.signal(signal.SIGALRM, timeout_handler)
+            signal.alarm(120)
+            
+            try:
+                # Salvar no banco de dados se disponível (logs antigos)
+                if db_manager.enabled:
                     try:
-                        if isinstance(msg_timestamp, (int, float)):
-                            dt_timestamp = datetime.fromtimestamp(float(msg_timestamp))
-                        elif isinstance(msg_timestamp, str) and msg_timestamp.isdigit():
-                            dt_timestamp = datetime.fromtimestamp(float(msg_timestamp))
+                        success = db_manager.save_webhook_event(event_type, event_data)
+                        if success:
+                            logger.info(f"💾 Evento {event_type} salvo no banco")
+                        else:
+                            logger.warning(f"⚠️ Falha ao salvar evento {event_type} no banco")
+                    except Exception as db_error:
+                        logger.warning(f"⚠️ Erro não crítico ao salvar no banco: {db_error}")
+
+                # NOVO: Gravar na estrutura de conversa (com tratamento robusto)
+                if event_type in ('message_received', 'message_sent'):
+                    try:
+                        logger.info(f"🔄 Processando {event_type} para gravar na estrutura de conversa...")
+                        contact_id = None
+                        message_text = None
+                        message_type = None
+                        sender = None
+                        msg_timestamp = None
+                        media_id = None
+                        media_type = None
+                        file_name = None
+                        
+                        if event_type == 'message_received':
+                            contact_id = event_data.get('from')
+                            sender = 'user'
+                            message_type = event_data.get('type', 'unknown')
+                            if message_type == 'text':
+                                message_text = event_data.get('text', {}).get('body')
+                            elif message_type == 'document':
+                                doc = event_data.get('document', {})
+                                media_id = doc.get('id')
+                                media_type = doc.get('mime_type')
+                                file_name = doc.get('filename')
+                                # Só usar caption se existir e não for vazio
+                                caption = doc.get('caption')
+                                message_text = caption if caption and caption.strip() else None
+                            elif message_type == 'image':
+                                img = event_data.get('image', {})
+                                media_id = img.get('id')
+                                media_type = img.get('mime_type')
+                                file_name = img.get('filename') if 'filename' in img else None
+                                # Só usar caption se existir e não for vazio
+                                caption = img.get('caption')
+                                message_text = caption if caption and caption.strip() else None
+                            msg_timestamp = event_data.get('timestamp')
+                        elif event_type == 'message_sent':
+                            contact_id = event_data.get('to')
+                            sender = 'agent'
+                            message_type = event_data.get('type', 'unknown')
+                            if message_type == 'text':
+                                message_text = event_data.get('text')
+                            msg_timestamp = event_data.get('timestamp')
+                        
+                        logger.info(f"📝 Extraído: contact_id={contact_id}, sender={sender}, message_text='{message_text[:50] if message_text else None}...'")
+                        
+                        # Converter timestamp se necessário
+                        dt_timestamp = None
+                        if msg_timestamp:
+                            try:
+                                if isinstance(msg_timestamp, (int, float)):
+                                    dt_timestamp = datetime.fromtimestamp(float(msg_timestamp))
+                                elif isinstance(msg_timestamp, str) and msg_timestamp.isdigit():
+                                    dt_timestamp = datetime.fromtimestamp(float(msg_timestamp))
+                                else:
+                                    dt_timestamp = datetime.now()
+                            except Exception:
+                                dt_timestamp = datetime.now()
                         else:
                             dt_timestamp = datetime.now()
-                    except Exception:
-                        dt_timestamp = datetime.now()
-                else:
-                    dt_timestamp = datetime.now()
-                # Buscar ou criar conversa ativa
-                conversation = db_manager.get_active_conversation(contact_id)
-                if not conversation:
-                    logger.info(f"📝 Criando nova conversa para {contact_id}")
-                    conversation_id = db_manager.create_conversation(contact_id)
-                else:
-                    conversation_id = conversation['id']
-                    logger.info(f"📝 Usando conversa existente {conversation_id} para {contact_id}")
-                
-                # Inserir mensagem
-                if message_text:
-                    logger.info(f"💾 Salvando mensagem na conversation_message: conversa_id={conversation_id}, sender={sender}")
-                    success = db_manager.insert_conversation_message(
-                        conversation_id=conversation_id,
-                        message_text=message_text,
-                        sender=sender,
-                        message_type=message_type,
-                        timestamp=dt_timestamp
-                    )
-                    if success:
-                        logger.info(f"✅ Mensagem salva com sucesso na conversation_message")
-                    else:
-                        logger.error(f"❌ Falha ao salvar mensagem na conversation_message")
-                else:
-                    logger.warning(f"⚠️ message_text está vazio, não salvando na conversation_message")
-                # Se for document ou image, buscar url do arquivo e salvar na conversation_attach
-                if message_type in ('document', 'image') and media_id:
-                    try:
-                        from whatsapp_service import whatsapp_service
-                        access_token = whatsapp_service.get_access_token()
-                        if access_token:
-                            url = f"https://graph.facebook.com/v21.0/{media_id}"
-                            headers = {"Authorization": f"Bearer {access_token}"}
-                            response = requests.get(url, headers=headers, timeout=30)
-                            if response.status_code == 200:
-                                media_json = response.json()
-                                file_url = media_json.get('url')
-                                file_type = media_json.get('mime_type')
-                                # Gravar file_name na conversation_attach
-                                db_manager.insert_conversation_attach(
-                                    conversation_id=conversation_id,
-                                    file_url=file_url,
-                                    file_type=file_type,
-                                    file_name=file_name
-                                )
-                                logger.info(f"Anexo salvo na conversa: {file_url}")
-                                
-                                # Adicionar mensagem contextual sobre o anexo
-                                if message_type == 'document':
-                                    attach_message = f"usuário anexou o documento de nome {file_name or 'sem nome'}"
-                                else:  # image
-                                    attach_message = f"usuário anexou a imagem de nome {file_name or 'sem nome'}"
-                                
-                                db_manager.insert_conversation_message(
-                                    conversation_id=conversation_id,
-                                    message_text=attach_message,
-                                    sender='user',
-                                    message_type='attachment_info',
-                                    timestamp=dt_timestamp
-                                )
-                                logger.info(f"Mensagem contextual do anexo salva: {attach_message}")
-                            else:
-                                logger.error(f"Erro ao buscar media do Graph API: {response.status_code} - {response.text}")
+                            
+                        # Buscar ou criar conversa ativa (com retry)
+                        conversation = None
+                        conversation_id = None
+                        
+                        for conv_attempt in range(3):
+                            try:
+                                conversation = db_manager.get_active_conversation(contact_id)
+                                if not conversation:
+                                    logger.info(f"📝 Criando nova conversa para {contact_id}")
+                                    conversation_id = db_manager.create_conversation(contact_id)
+                                else:
+                                    conversation_id = conversation['id']
+                                    logger.info(f"📝 Usando conversa existente {conversation_id} para {contact_id}")
+                                break
+                            except Exception as conv_error:
+                                logger.warning(f"Erro ao obter/criar conversa (tentativa {conv_attempt + 1}): {conv_error}")
+                                time.sleep(1)
+                        
+                        # Inserir mensagem se tiver dados válidos
+                        if conversation_id and message_text:
+                            logger.info(f"💾 Salvando mensagem na conversation_message: conversa_id={conversation_id}, sender={sender}")
+                            for msg_attempt in range(3):
+                                try:
+                                    success = db_manager.insert_conversation_message(
+                                        conversation_id=conversation_id,
+                                        message_text=message_text,
+                                        sender=sender,
+                                        message_type=message_type,
+                                        timestamp=dt_timestamp
+                                    )
+                                    if success:
+                                        logger.info(f"✅ Mensagem salva com sucesso na conversation_message")
+                                        break
+                                    else:
+                                        logger.error(f"❌ Falha ao salvar mensagem na conversation_message (tentativa {msg_attempt + 1})")
+                                except Exception as msg_error:
+                                    logger.warning(f"Erro ao salvar mensagem (tentativa {msg_attempt + 1}): {msg_error}")
+                                    time.sleep(1)
                         else:
-                            logger.error("Access token do WhatsApp não disponível para buscar media.")
-                    except Exception as e:
-                        logger.error(f"Erro ao buscar/salvar anexo da conversa: {e}")
-            # Processar lógica específica baseada no tipo
-            if event_type == 'webhook_received':
-                self._process_webhook_received(event_data)
-            elif event_type == 'message_received':
-                self._process_message_received(event_data)
-            elif event_type == 'chatgpt_delay_check':
-                self._process_chatgpt_delay_check(event_data)
-            elif event_type == 'status_update':
-                self._process_status_update(event_data)
-            elif 'error' in event_type:
-                self._process_error(event_data)
+                            logger.warning(f"⚠️ message_text está vazio ou conversation_id inválido, não salvando na conversation_message")
+                            
+                    except Exception as conv_error:
+                        logger.error(f"❌ Erro não crítico ao processar estrutura de conversa: {conv_error}")
+                
+                # Processar lógica específica baseada no tipo (com proteção)
+                try:
+                    if event_type == 'webhook_received':
+                        self._process_webhook_received(event_data)
+                    elif event_type == 'message_received':
+                        self._process_message_received(event_data)
+                    elif event_type == 'chatgpt_delay_check':
+                        self._process_chatgpt_delay_check(event_data)
+                    elif event_type == 'status_update':
+                        self._process_status_update(event_data)
+                    elif 'error' in event_type:
+                        self._process_error(event_data)
+                except Exception as process_error:
+                    logger.error(f"❌ Erro ao processar lógica específica de {event_type}: {process_error}")
+                    # Não deixa falhar o processamento geral
+                
+            finally:
+                signal.alarm(0)  # Cancelar timeout
             
+            # Calcular tempo de processamento
+            processing_time = time.time() - start_time
             self.processed_count += 1
-            logger.info(f"✅ Evento processado com sucesso. Total: {self.processed_count}")
+            logger.info(f"✅ Evento processado com sucesso em {processing_time:.2f}s. Total: {self.processed_count}")
             return True
             
-        except Exception as e:
-            logger.error(f"❌ Erro ao processar mensagem: {e}")
+        except TimeoutError as timeout_error:
+            processing_time = time.time() - start_time
+            logger.error(f"⏰ Timeout ao processar mensagem após {processing_time:.2f}s: {timeout_error}")
             self.error_count += 1
-            return False
+            return False  # Marcar como erro mas não quebrar o worker
+            
+        except Exception as e:
+            processing_time = time.time() - start_time
+            logger.error(f"❌ Erro ao processar mensagem após {processing_time:.2f}s: {e}")
+            # Log detalhado para debug
+            logger.error(f"❌ Dados da mensagem: {message}")
+            import traceback
+            logger.error(f"❌ Traceback: {traceback.format_exc()}")
+            
+            self.error_count += 1
+            return False  # Retornar False para rejeitar mensagem mas manter worker rodando
     
     def _process_webhook_received(self, event_data):
         """Processa webhook completo recebido"""
@@ -283,10 +300,21 @@ class WebhookWorker:
             
             logger.info(f"🔍 Processando delay check para {contact_id} (task criada em: {task_created_timestamp})")
             
+            # LOG DETALHADO: Início do debounce
+            logger.info(f"📊 INÍCIO - Verificando debounce para conversation_id={conversation_id}")
+            
             # Debounce simples: verificar se há mensagens mais novas que a criação desta tarefa
             # Buscar a última mensagem do usuário
-            ultimas_msgs = db_manager.get_last_user_messages(conversation_id, limit=1)
+            logger.info(f"📊 ETAPA 1 - Buscando últimas mensagens do usuário...")
+            try:
+                ultimas_msgs = db_manager.get_last_user_messages(conversation_id, limit=1)
+                logger.info(f"📊 ETAPA 1 - SUCESSO: Encontradas {len(ultimas_msgs) if ultimas_msgs else 0} mensagens")
+            except Exception as e:
+                logger.error(f"📊 ETAPA 1 - ERRO: {e}")
+                raise
+            
             if ultimas_msgs:
+                logger.info(f"📊 ETAPA 2 - Processando timestamp da última mensagem...")
                 ultima_msg = ultimas_msgs[0]
                 ultima_timestamp = ultima_msg['timestamp']
                 
@@ -302,43 +330,53 @@ class WebhookWorker:
                 if ultima_timestamp.tzinfo is None:
                     ultima_timestamp = ultima_timestamp.replace(tzinfo=timezone.utc)
                 
-                ultima_timestamp_float = ultima_timestamp.timestamp()
+                logger.info(f"📊 ETAPA 2 - SUCESSO: Timestamp convertido: {ultima_timestamp}")
                 
-                # Se há uma mensagem mais nova que a criação desta tarefa, ignorar
-                if ultima_timestamp_float > task_created_timestamp + 0.5:  # +0.5s para margem
-                    logger.info(f"🚫 Tarefa obsoleta: task criada em {task_created_timestamp}, última msg em {ultima_timestamp_float}. Ignorando...")
+                # Verificar se a mensagem é mais nova que a tarefa
+                diff_task = ultima_timestamp.timestamp() - task_created_timestamp
+                logger.info(f"📊 ETAPA 3 - Verificando se mensagem é mais nova: diff={diff_task:.2f}s")
+                
+                if diff_task > 0:
+                    logger.info(f"⏭️ Mensagem mais nova detectada (+{diff_task:.1f}s), cancelando tarefa")
                     return
+                else:
+                    logger.info(f"✅ Mensagem anterior à tarefa (-{abs(diff_task):.1f}s), continuando processamento")
+            else:
+                logger.warning(f"📊 ETAPA 2 - Nenhuma mensagem do usuário encontrada na conversa {conversation_id}")
+
+            # LOG DETALHADO: Buscar conversa ativa
+            logger.info(f"📊 ETAPA 4 - Buscando conversa ativa para {contact_id}...")
+            try:
+                conversation = db_manager.get_active_conversation(contact_id)
+                logger.info(f"📊 ETAPA 4 - SUCESSO: Conversa encontrada: {conversation['id'] if conversation else 'None'}")
+            except Exception as e:
+                logger.error(f"📊 ETAPA 4 - ERRO: {e}")
+                raise
                 
-                logger.info(f"✅ Tarefa válida: task criada em {task_created_timestamp}, última msg em {ultima_timestamp_float}")
-            
-            # Contador de tentativas para evitar loop infinito
-            retry_count = event_data.get('retry_count', 0)
-            max_retries = 10  # Máximo de 10 reagendamentos (cerca de 100s total)
-            
-            # Verificar se excedeu o número máximo de tentativas
-            if retry_count >= max_retries:
-                logger.warning(f"⚠️ Máximo de tentativas excedido para {contact_id}, processando mesmo assim...")
-                self._process_chatgpt_response(contact_id, None)
-                return
-            
-            # Buscar conversa ativa para verificar mensagens
-            conversation = db_manager.get_active_conversation(contact_id)
             if not conversation:
-                logger.warning(f"Nenhuma conversa ativa encontrada para {contact_id}")
+                logger.warning(f"📊 ETAPA 4 - Nenhuma conversa ativa encontrada para {contact_id}")
                 return
                 
             conversation_id = conversation['id']
             
-            # Verificar se houve mensagens recentes (últimos 10s)
-            ultimas_msgs_user = db_manager.get_last_user_messages(conversation_id, limit=1)
+            # LOG DETALHADO: Verificar mensagens recentes
+            logger.info(f"📊 ETAPA 5 - Verificando se houve mensagens recentes (últimos 10s)...")
+            try:
+                ultimas_msgs_user = db_manager.get_last_user_messages(conversation_id, limit=1)
+                logger.info(f"📊 ETAPA 5 - SUCESSO: {len(ultimas_msgs_user) if ultimas_msgs_user else 0} mensagens encontradas")
+            except Exception as e:
+                logger.error(f"📊 ETAPA 5 - ERRO: {e}")
+                raise
+                
             if not ultimas_msgs_user:
-                logger.warning(f"Nenhuma mensagem do usuário encontrada na conversa {conversation_id}")
+                logger.warning(f"📊 ETAPA 5 - Nenhuma mensagem do usuário encontrada na conversa {conversation_id}")
                 return
                 
             ultima_user = ultimas_msgs_user[0]
             agora = datetime.now(timezone.utc)
             ts = ultima_user['timestamp']
             
+            logger.info(f"📊 ETAPA 6 - Convertendo timestamp para verificação de delay...")
             # Converter timestamp para datetime
             if isinstance(ts, str):
                 try:
@@ -355,115 +393,213 @@ class WebhookWorker:
                 ts = ts.replace(tzinfo=timezone.utc)
                 
             diff = (agora - ts).total_seconds()
-            logger.info(f"⏱️ Verificando delay para {contact_id}: última mensagem há {diff:.1f}s (tentativa {retry_count + 1}/{max_retries})")
+            logger.info(f"📊 ETAPA 6 - SUCESSO: Última mensagem há {diff:.1f}s")
             logger.info(f"🔍 DEBUG - Agora: {agora}, Timestamp msg: {ts}, Diff: {diff:.1f}s")
             
             if diff >= 10:
                 # Já se passaram 10s, processar com ChatGPT
-                logger.info(f"✅ 10s aguardados desde a última mensagem, enviando para ChatGPT...")
-                self._process_chatgpt_response(contact_id, None)
+                logger.info(f"📊 ETAPA 7 - ✅ 10s aguardados, enviando para ChatGPT...")
+                try:
+                    self._process_chatgpt_response(contact_id, None)
+                    logger.info(f"📊 ETAPA 7 - SUCESSO: ChatGPT processado com sucesso")
+                except Exception as e:
+                    logger.error(f"📊 ETAPA 7 - ERRO no ChatGPT: {e}")
+                    raise
             else:
-                # Ainda há mensagens recentes, precisa aguardar mais
+                # Ainda há mensagens recentes, aguardar mais
                 tempo_espera = 10 - diff + 0.5  # +0.5s para margem de segurança
                 logger.info(f"⏰ Última mensagem há apenas {diff:.1f}s, aguardando mais {tempo_espera:.1f}s...")
-                
-                # Incrementar contador de tentativas
-                event_data['retry_count'] = retry_count + 1
                 
                 # Aguardar o tempo necessário
                 logger.info(f"⏳ Aguardando {tempo_espera:.1f}s antes de verificar novamente...")
                 time.sleep(tempo_espera)
                 
-                # IMPORTANTE: Verificar novamente após o delay para pegar mensagens que podem ter chegado
+                # IMPORTANTE: Verificar novamente após o delay
                 logger.info(f"🔄 Verificando novamente para ver se chegaram novas mensagens...")
                 
-                # Buscar novamente as últimas mensagens para ver se chegou algo novo
-                ultimas_msgs_nova_check = db_manager.get_last_user_messages(conversation_id, limit=1)
+                # Buscar novamente as últimas mensagens
+                logger.info(f"📊 ETAPA 8 - Nova verificação após espera...")
+                try:
+                    ultimas_msgs_nova_check = db_manager.get_last_user_messages(conversation_id, limit=1)
+                    logger.info(f"📊 ETAPA 8 - SUCESSO: {len(ultimas_msgs_nova_check) if ultimas_msgs_nova_check else 0} mensagens na nova verificação")
+                except Exception as e:
+                    logger.error(f"📊 ETAPA 8 - ERRO: {e}")
+                    raise
+                
                 if ultimas_msgs_nova_check:
-                    ultima_nova = ultimas_msgs_nova_check[0]
-                    ts_nova = ultima_nova['timestamp']
+                    nova_ultima = ultimas_msgs_nova_check[0]
+                    nova_ts = nova_ultima['timestamp']
                     
-                    # Converter timestamp para datetime
-                    if isinstance(ts_nova, str):
+                    # Converter para comparação
+                    if isinstance(nova_ts, str):
                         try:
-                            ts_nova = datetime.fromisoformat(ts_nova.replace('Z', '+00:00'))
+                            nova_ts = datetime.fromisoformat(nova_ts.replace('Z', '+00:00'))
                         except ValueError:
                             try:
-                                ts_nova = datetime.strptime(ts_nova, "%Y-%m-%d %H:%M:%S.%f")
+                                nova_ts = datetime.strptime(nova_ts, "%Y-%m-%d %H:%M:%S.%f")
                             except ValueError:
-                                ts_nova = datetime.strptime(ts_nova, "%Y-%m-%d %H:%M:%S")
-                    if ts_nova.tzinfo is None:
-                        ts_nova = ts_nova.replace(tzinfo=timezone.utc)
+                                nova_ts = datetime.strptime(nova_ts, "%Y-%m-%d %H:%M:%S")
+                    if nova_ts.tzinfo is None:
+                        nova_ts = nova_ts.replace(tzinfo=timezone.utc)
                     
-                    # Se chegou uma mensagem mais nova, recalcular
-                    if ts_nova > ts:
-                        logger.info(f"🆕 Nova mensagem detectada durante espera! Última agora é de {ts_nova}")
-                        # Atualizar o event_data com o novo timestamp e resetar contador
-                        event_data['created_at'] = ts_nova.timestamp()
-                        event_data['retry_count'] = 0  # Resetar contador pois é uma nova mensagem
-                        logger.info(f"🔄 Resetando contador de tentativas pois nova mensagem foi detectada")
-                        
-                # Verificar novamente recursivamente
-                self._process_chatgpt_delay_check(event_data)
-                
+                    # Verificar se chegou mensagem nova
+                    if nova_ts > ts:
+                        logger.info(f"📊 ETAPA 9 - Nova mensagem detectada após espera, cancelando processamento")
+                        return
+                    else:
+                        logger.info(f"📊 ETAPA 9 - Nenhuma mensagem nova, processando com ChatGPT...")
+                        try:
+                            self._process_chatgpt_response(contact_id, None)
+                            logger.info(f"📊 ETAPA 9 - SUCESSO: ChatGPT processado com sucesso")
+                        except Exception as e:
+                            logger.error(f"📊 ETAPA 9 - ERRO no ChatGPT: {e}")
+                            raise
+                else:
+                    logger.warning(f"📊 ETAPA 9 - Nenhuma mensagem encontrada na nova verificação")
+            
+            logger.info(f"📊 FIM - Delay check concluído com sucesso para {contact_id}")
+            
         except Exception as e:
-            logger.error(f"❌ Erro ao processar delay check: {e}")
+            logger.error(f"❌ Erro no processamento ChatGPT para {contact_id}: {e}")
+            import traceback
+            logger.error(f"❌ Traceback completo: {traceback.format_exc()}")
+            raise
 
     def _process_chatgpt_response(self, contact_id, message_text):
         """Processa mensagem com ChatGPT e envia resposta"""
-        try:
-            # Importar serviços aqui para evitar problemas de inicialização
-            from chatgpt_service import chatgpt_service
-            from whatsapp_service import whatsapp_service
-            
-            logger.info(f"🤖 Processando mensagem com ChatGPT para {contact_id}")
-            
-            # Se message_text é None, o ChatGPT service buscará automaticamente
-            # o contexto completo da conversa (últimas 10 mensagens)
-            if message_text is None:
-                logger.info(f"📚 ChatGPT service buscará contexto completo da conversa para {contact_id}")
-            
-            # Gerar resposta com ChatGPT
-            chatgpt_response = chatgpt_service.process_message(contact_id, message_text)
-            
-            if chatgpt_response:
-                logger.info(f"✅ ChatGPT respondeu: {chatgpt_response[:50]}...")
-                
-                # Salvar resposta do ChatGPT na conversa (sender=agent)
-                conversation = db_manager.get_active_conversation(contact_id)
-                if conversation:
-                    conversation_id = conversation['id']
-                    db_manager.insert_conversation_message(
-                        conversation_id=conversation_id,
-                        message_text=chatgpt_response,
-                        sender='agent',
-                        message_type='text',
-                        timestamp=datetime.now()
-                    )
-                else:
-                    logger.warning(f"Não encontrou conversa ativa para {contact_id} ao salvar resposta do ChatGPT.")
-                
-                # Enviar resposta via WhatsApp
-                sent = whatsapp_service.process_outgoing_message(contact_id, chatgpt_response)
-                
-                if sent:
-                    logger.info(f"📤 Resposta enviada com sucesso para {contact_id}")
-                else:
-                    logger.warning(f"⚠️ Falha ao enviar resposta para {contact_id}")
-            else:
-                logger.warning(f"⚠️ ChatGPT não gerou resposta para {contact_id}")
-                
-        except Exception as e:
-            logger.error(f"❌ Erro no processamento ChatGPT para {contact_id}: {e}")
-            # Em caso de erro, enviar mensagem padrão (opcional)
+        max_retries = 3
+        retry_count = 0
+        
+        while retry_count < max_retries:
             try:
-                from whatsapp_service import whatsapp_service
-                whatsapp_service.process_outgoing_message(
-                    contact_id, 
-                    "Desculpe, estou com dificuldades técnicas no momento. Tente novamente em alguns minutos."
-                )
-            except:
-                pass
+                logger.info(f"🤖 Processando mensagem com ChatGPT para {contact_id} (tentativa {retry_count + 1}/{max_retries})")
+                
+                # Importar serviços com timeout e tratamento de erro
+                try:
+                    import importlib
+                    import sys
+                    
+                    # Recarregar módulos se necessário (evita cache corrompido)
+                    if 'chatgpt_service' in sys.modules:
+                        importlib.reload(sys.modules['chatgpt_service'])
+                    if 'whatsapp_service' in sys.modules:
+                        importlib.reload(sys.modules['whatsapp_service'])
+                    
+                    from chatgpt_service import chatgpt_service
+                    from whatsapp_service import whatsapp_service
+                    
+                except ImportError as e:
+                    logger.error(f"❌ Erro ao importar serviços: {e}")
+                    retry_count += 1
+                    time.sleep(2 ** retry_count)  # Backoff exponencial
+                    continue
+                
+                # Se message_text é None, o ChatGPT service buscará automaticamente
+                # o contexto completo da conversa (últimas 10 mensagens)
+                if message_text is None:
+                    logger.info(f"📚 ChatGPT service buscará contexto completo da conversa para {contact_id}")
+                
+                # Gerar resposta com ChatGPT com timeout
+                try:
+                    import signal
+                    
+                    def timeout_handler(signum, frame):
+                        raise TimeoutError("ChatGPT timeout")
+                    
+                    # Configurar timeout de 45 segundos
+                    signal.signal(signal.SIGALRM, timeout_handler)
+                    signal.alarm(45)
+                    
+                    try:
+                        chatgpt_response = chatgpt_service.process_message(contact_id, message_text)
+                    finally:
+                        signal.alarm(0)  # Cancelar timeout
+                        
+                except TimeoutError:
+                    logger.error(f"⏰ Timeout no ChatGPT para {contact_id}")
+                    retry_count += 1
+                    time.sleep(2 ** retry_count)
+                    continue
+                
+                if chatgpt_response:
+                    logger.info(f"✅ ChatGPT respondeu: {chatgpt_response[:50]}...")
+                    
+                    # Salvar resposta do ChatGPT na conversa (sender=agent) com retry
+                    conversation_saved = False
+                    for save_attempt in range(3):
+                        try:
+                            conversation = db_manager.get_active_conversation(contact_id)
+                            if conversation:
+                                conversation_id = conversation['id']
+                                success = db_manager.insert_conversation_message(
+                                    conversation_id=conversation_id,
+                                    message_text=chatgpt_response,
+                                    sender='agent',
+                                    message_type='text',
+                                    timestamp=datetime.now()
+                                )
+                                if success:
+                                    conversation_saved = True
+                                    break
+                                else:
+                                    logger.warning(f"Tentativa {save_attempt + 1} de salvar conversa falhou")
+                            else:
+                                logger.warning(f"Não encontrou conversa ativa para {contact_id} ao salvar resposta do ChatGPT.")
+                                conversation_saved = True  # Não bloquear por isso
+                                break
+                        except Exception as save_error:
+                            logger.warning(f"Erro ao salvar conversa (tentativa {save_attempt + 1}): {save_error}")
+                            time.sleep(1)
+                    
+                    if not conversation_saved:
+                        logger.error(f"❌ Falha ao salvar conversa após 3 tentativas para {contact_id}")
+                    
+                    # Enviar resposta via WhatsApp com retry
+                    send_success = False
+                    for send_attempt in range(3):
+                        try:
+                            sent = whatsapp_service.process_outgoing_message(contact_id, chatgpt_response)
+                            if sent:
+                                logger.info(f"📤 Resposta enviada com sucesso para {contact_id}")
+                                send_success = True
+                                break
+                            else:
+                                logger.warning(f"⚠️ Tentativa {send_attempt + 1} de envio falhou para {contact_id}")
+                        except Exception as send_error:
+                            logger.warning(f"Erro no envio (tentativa {send_attempt + 1}): {send_error}")
+                            time.sleep(1)
+                    
+                    if not send_success:
+                        logger.error(f"❌ Falha ao enviar mensagem após 3 tentativas para {contact_id}")
+                    
+                    # Sucesso - sair do loop de retry
+                    return
+                    
+                else:
+                    logger.warning(f"⚠️ ChatGPT não gerou resposta para {contact_id}")
+                    retry_count += 1
+                    time.sleep(2 ** retry_count)
+                    continue
+                    
+            except Exception as e:
+                logger.error(f"❌ Erro no processamento ChatGPT para {contact_id} (tentativa {retry_count + 1}): {e}")
+                retry_count += 1
+                
+                if retry_count < max_retries:
+                    time.sleep(2 ** retry_count)  # Backoff exponencial
+                else:
+                    # Última tentativa - enviar mensagem de erro
+                    try:
+                        from whatsapp_service import whatsapp_service
+                        whatsapp_service.process_outgoing_message(
+                            contact_id, 
+                            "Desculpe, estou com dificuldades técnicas no momento. Tente novamente em alguns minutos."
+                        )
+                        logger.info(f"📤 Mensagem de erro enviada para {contact_id}")
+                    except Exception as fallback_error:
+                        logger.error(f"❌ Falha até no envio de mensagem de erro: {fallback_error}")
+        
+        logger.error(f"❌ Falha total no processamento para {contact_id} após {max_retries} tentativas")
     
     def _process_status_update(self, event_data):
         """Processa atualização de status"""
@@ -493,56 +629,180 @@ class WebhookWorker:
         if not RABBITMQ_ENABLED:
             logger.error("❌ RabbitMQ está desabilitado")
             return False
-        
+
         logger.info(f"🚀 Iniciando worker para fila: {queue_name}")
         logger.info("=" * 60)
         logger.info(f"Worker PID: {os.getpid()}")
         logger.info(f"Timestamp: {datetime.now().isoformat()}")
         logger.info("=" * 60)
-        
+
+        # Variáveis de monitoramento de saúde
+        last_message_time = time.time()
+        health_check_interval = 60  # 1 minuto
+        max_idle_time = 300  # 5 minutos sem mensagens
+        consecutive_failures = 0
+        max_consecutive_failures = 10
+
         try:
             # Conectar ao RabbitMQ
             if not rabbitmq_manager.connect():
                 logger.error("❌ Falha ao conectar ao RabbitMQ")
                 return False
+
+            # Consumir mensagens com sistema de monitoramento
+            def callback(message):
+                nonlocal last_message_time, consecutive_failures
+                
+                if not self.running:
+                    logger.info("🛑 Worker marcado para parar, rejeitando mensagem")
+                    return False
+                
+                try:
+                    # Registrar recebimento de mensagem
+                    last_message_time = time.time()
+                    
+                    # Log de saúde a cada 50 mensagens
+                    if self.processed_count % 50 == 0:
+                        logger.info(f"💊 Health check: Processadas={self.processed_count}, Erros={self.error_count}, Falhas consecutivas={consecutive_failures}")
+                    
+                    # Processar mensagem
+                    result = self.process_webhook_message(message)
+                    
+                    if result:
+                        consecutive_failures = 0  # Reset contador de falhas
+                        return True
+                    else:
+                        consecutive_failures += 1
+                        logger.warning(f"⚠️ Falha consecutiva #{consecutive_failures}")
+                        
+                        # Se muitas falhas consecutivas, tentar recovery
+                        if consecutive_failures >= max_consecutive_failures:
+                            logger.error(f"💀 Muitas falhas consecutivas ({consecutive_failures}), tentando recovery...")
+                            self._attempt_recovery()
+                            consecutive_failures = 0  # Reset após recovery
+                        
+                        return False
+                        
+                except Exception as callback_error:
+                    consecutive_failures += 1
+                    logger.error(f"❌ Erro crítico no callback (falha #{consecutive_failures}): {callback_error}")
+                    
+                    # Recovery em caso de erro crítico
+                    if consecutive_failures >= max_consecutive_failures // 2:  # Recovery mais agressivo
+                        logger.error("💀 Muitos erros críticos, tentando recovery...")
+                        self._attempt_recovery()
+                        consecutive_failures = 0
+                    
+                    return False
+
+            logger.info(f"🎧 Aguardando mensagens da fila '{queue_name}'...")
+            
+            # Iniciar thread de monitoramento de saúde
+            import threading
+            def health_monitor():
+                nonlocal last_message_time  # Importante: acessar variável do escopo externo
+                while self.running:
+                    try:
+                        time.sleep(health_check_interval)
+                        current_time = time.time()
+                        
+                        # Verificar se não está processando há muito tempo
+                        idle_time = current_time - last_message_time
+                        if idle_time > max_idle_time:
+                            logger.warning(f"⚠️ Worker idle há {idle_time:.0f}s (>{max_idle_time}s)")
+                            
+                            # Verificar se há mensagens na fila
+                            try:
+                                queue_info = rabbitmq_manager.channel.queue_declare(queue=queue_name, passive=True)
+                                message_count = queue_info.method.message_count
+                                
+                                if message_count > 0:
+                                    logger.error(f"💀 {message_count} mensagens na fila mas worker idle! Tentando recovery...")
+                                    self._attempt_recovery()
+                                    last_message_time = current_time  # Reset timer
+                                else:
+                                    logger.info(f"✅ Fila vazia, idle normal")
+                                    
+                            except Exception as queue_check_error:
+                                logger.error(f"❌ Erro ao verificar fila: {queue_check_error}")
+                        
+                        # Log de estatísticas a cada 5 minutos
+                        if self.processed_count > 0 and self.processed_count % 100 == 0:
+                            error_rate = (self.error_count / (self.processed_count + self.error_count)) * 100
+                            logger.info(f"📊 Estatísticas: {self.processed_count} processadas, {self.error_count} erros ({error_rate:.1f}% erro)")
+                            
+                    except Exception as monitor_error:
+                        logger.error(f"❌ Erro no monitor de saúde: {monitor_error}")
+                        # Aguardar um pouco antes da próxima verificação
+                        time.sleep(health_check_interval)
+            
+            health_thread = threading.Thread(target=health_monitor, daemon=True)
+            health_thread.start()
+            logger.info("💊 Monitor de saúde iniciado")
             
             # Consumir mensagens
-            def callback(message):
-                if not self.running:
-                    return False
-                return self.process_webhook_message(message)
-            
-            logger.info(f"🎧 Aguardando mensagens da fila '{queue_name}'...")
             rabbitmq_manager.consume_messages(queue_name, callback, auto_ack=False)
-            
+
         except KeyboardInterrupt:
             logger.info("⏹️ Parando worker por interrupção do usuário")
         except Exception as e:
             logger.error(f"❌ Erro no worker: {e}")
+            import traceback
+            logger.error(f"❌ Traceback: {traceback.format_exc()}")
         finally:
             self._cleanup()
-        
+
         return True
     
-    def _cleanup(self):
-        """Limpa recursos antes de finalizar"""
-        logger.info("🧹 Realizando limpeza...")
-        
-        # Fechar conexões
+    def _attempt_recovery(self):
+        """Tenta recuperar o worker de problemas"""
         try:
-            rabbitmq_manager.disconnect()
-            db_manager.disconnect()
-        except Exception as e:
-            logger.error(f"❌ Erro na limpeza: {e}")
-        
-        # Log final
-        logger.info("=" * 60)
-        logger.info("📊 ESTATÍSTICAS DO WORKER")
-        logger.info(f"✅ Mensagens processadas: {self.processed_count}")
-        logger.info(f"❌ Erros encontrados: {self.error_count}")
-        logger.info(f"⏰ Tempo de execução: {datetime.now().isoformat()}")
-        logger.info("=" * 60)
-        logger.info("🏁 Worker finalizado")
+            logger.info("🔄 Iniciando tentativa de recovery...")
+            
+            # Fechar conexões existentes
+            try:
+                if rabbitmq_manager.channel:
+                    rabbitmq_manager.channel.stop_consuming()
+                if rabbitmq_manager.connection:
+                    rabbitmq_manager.connection.close()
+                logger.info("✅ Conexões RabbitMQ fechadas")
+            except Exception as close_error:
+                logger.warning(f"⚠️ Erro ao fechar conexões: {close_error}")
+            
+            # Aguardar um pouco
+            time.sleep(5)
+            
+            # Tentar reconectar
+            if rabbitmq_manager.connect():
+                logger.info("✅ Recovery bem-sucedido - reconectado ao RabbitMQ")
+            else:
+                logger.error("❌ Recovery falhou - não conseguiu reconectar")
+                
+        except Exception as recovery_error:
+            logger.error(f"❌ Erro durante recovery: {recovery_error}")
+    
+    def _cleanup(self):
+        """Limpeza final do worker"""
+        try:
+            logger.info("🧹 Fazendo limpeza final do worker...")
+            
+            # Parar consumo
+            self.running = False
+            
+            # Fechar conexões
+            if rabbitmq_manager:
+                rabbitmq_manager.disconnect()
+            
+            # Log de estatísticas finais
+            total_messages = self.processed_count + self.error_count
+            if total_messages > 0:
+                success_rate = (self.processed_count / total_messages) * 100
+                logger.info(f"📊 Estatísticas finais: {self.processed_count} sucessos, {self.error_count} erros ({success_rate:.1f}% sucesso)")
+            
+            logger.info("✅ Cleanup concluído")
+            
+        except Exception as cleanup_error:
+            logger.error(f"❌ Erro durante cleanup: {cleanup_error}")
 
 def main():
     """Função principal do worker"""

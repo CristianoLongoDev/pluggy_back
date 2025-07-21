@@ -55,10 +55,34 @@ class ChatGPTDelayWorker:
                         time.sleep(sleep_time)
                         logger.info(f"✅ Delay de {sleep_time:.1f}s concluído, processando agora...")
                 
-                # Processar usando o método do webhook worker
-                self.webhook_worker._process_chatgpt_delay_check(message_data)
-                self.processed_count += 1
-                logger.info(f"✅ Tarefa de delay processada. Total: {self.processed_count}")
+                # Processar com proteção de timeout
+                import signal
+                
+                def timeout_handler(signum, frame):
+                    raise TimeoutError("Timeout no processamento de delay check")
+                
+                # Configurar timeout de 60 segundos
+                signal.signal(signal.SIGALRM, timeout_handler)
+                signal.alarm(60)
+                
+                try:
+                    # Processar usando o método do webhook worker
+                    self.webhook_worker._process_chatgpt_delay_check(message_data)
+                    self.processed_count += 1
+                    logger.info(f"✅ Tarefa de delay processada. Total: {self.processed_count}")
+                except TimeoutError:
+                    logger.error(f"⏰ Timeout ao processar delay check - rejeitando mensagem")
+                    ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
+                    self.error_count += 1
+                    return
+                except Exception as process_error:
+                    logger.error(f"❌ Erro ao processar delay check: {process_error}")
+                    ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
+                    self.error_count += 1
+                    return
+                finally:
+                    signal.alarm(0)  # Cancelar timeout
+                    
             else:
                 logger.warning(f"⚠️ Tipo de tarefa desconhecido: {message_data.get('task_type')}")
             

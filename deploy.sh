@@ -154,6 +154,11 @@ if [ -f "k8s/ingress.yaml" ]; then
     echo -e "${GREEN}✅ Ingress aplicado${NC}"
 fi
 
+echo ""
+echo -e "${GREEN}🌐 Deletando pod"
+kubectl delete pod -n whatsapp-webhook -l app=whatsapp-webhook
+
+
 # Verificação final
 echo -e "${BLUE}🔍 Verificação final do sistema...${NC}"
 echo ""

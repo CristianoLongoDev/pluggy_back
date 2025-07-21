@@ -189,7 +189,7 @@ class DatabaseManager:
             return False
     
     def _update_table_structure(self):
-        """Atualiza a estrutura da tabela logs adicionando novos campos se necessário"""
+        """Atualiza a estrutura das tabelas adicionando novos campos se necessário"""
         if not self.enabled:
             return False
             
@@ -200,35 +200,43 @@ class DatabaseManager:
         try:
             cursor = connection.cursor()
             
-            # Verificar se os novos campos existem
+            # Atualizar tabela logs
             cursor.execute("DESCRIBE logs")
-            existing_columns = [column[0] for column in cursor.fetchall()]
+            existing_logs_columns = [column[0] for column in cursor.fetchall()]
             
             # Adicionar campo 'type' se não existir
-            if 'type' not in existing_columns:
+            if 'type' not in existing_logs_columns:
                 cursor.execute("ALTER TABLE logs ADD COLUMN type VARCHAR(20) NULL AFTER event_type")
                 cursor.execute("ALTER TABLE logs ADD INDEX idx_type (type)")
                 logger.info("Campo 'type' adicionado à tabela logs")
             
             # Adicionar campo 'message' se não existir
-            if 'message' not in existing_columns:
+            if 'message' not in existing_logs_columns:
                 cursor.execute("ALTER TABLE logs ADD COLUMN message TEXT NULL AFTER type")
                 logger.info("Campo 'message' adicionado à tabela logs")
             
             # Adicionar campo 'id_contact' se não existir
-            if 'id_contact' not in existing_columns:
+            if 'id_contact' not in existing_logs_columns:
                 cursor.execute("ALTER TABLE logs ADD COLUMN id_contact VARCHAR(50) NULL AFTER message")
                 cursor.execute("ALTER TABLE logs ADD INDEX idx_id_contact (id_contact)")
                 logger.info("Campo 'id_contact' adicionado à tabela logs")
             
+            # Atualizar tabela contacts
+            cursor.execute("DESCRIBE contacts")
+            existing_contacts_columns = [column[0] for column in cursor.fetchall()]
+            
+            # Adicionar campo 'email' se não existir
+            if 'email' not in existing_contacts_columns:
+                cursor.execute("ALTER TABLE contacts ADD COLUMN email VARCHAR(255) NULL AFTER name")
+                cursor.execute("ALTER TABLE contacts ADD INDEX idx_email (email)")
+                logger.info("Campo 'email' adicionado à tabela contacts")
+            
             connection.commit()
             cursor.close()
-            
-            logger.info("Estrutura da tabela logs atualizada com sucesso")
             return True
             
         except Error as e:
-            logger.error(f"Erro ao atualizar estrutura da tabela: {e}")
+            logger.error(f"Erro ao atualizar estrutura das tabelas: {e}")
             return False
     
     def migrate_existing_data(self, limit=1000):
@@ -377,6 +385,49 @@ class DatabaseManager:
             logger.error(f"Erro geral ao inserir/atualizar contato: {e}")
             return False
             
+    def update_contact_email(self, contact_id, email):
+        """Atualiza o email de um contato na tabela contacts"""
+        if not self.enabled:
+            return False
+            
+        connection = self._get_connection()
+        if not connection:
+            return False
+            
+        try:
+            cursor = connection.cursor()
+            
+            # Primeiro, verificar se o contato existe
+            check_query = "SELECT id FROM contacts WHERE id = %s"
+            cursor.execute(check_query, (contact_id,))
+            contact_exists = cursor.fetchone()
+            
+            if not contact_exists:
+                # Criar o contato se não existir
+                insert_query = """
+                    INSERT INTO contacts (id, email, created_at) 
+                    VALUES (%s, %s, NOW())
+                """
+                cursor.execute(insert_query, (contact_id, email))
+                logger.info(f"Contato {contact_id} criado com email {email}")
+            else:
+                # Atualizar o email do contato existente
+                update_query = """
+                    UPDATE contacts 
+                    SET email = %s, updated_at = NOW() 
+                    WHERE id = %s
+                """
+                cursor.execute(update_query, (email, contact_id))
+                logger.info(f"Email do contato {contact_id} atualizado para {email}")
+            
+            connection.commit()
+            cursor.close()
+            return True
+            
+        except Error as e:
+            logger.error(f"Erro ao atualizar email do contato {contact_id}: {e}")
+            return False
+            
     def get_config(self, config_id):
         """Busca uma configuração por ID"""
         if not self.enabled:
@@ -479,18 +530,31 @@ class DatabaseManager:
         try:
             cursor = connection.cursor(dictionary=True)
             
+            # Buscar conversa ativa do contato
+            conversation_query = """
+            SELECT id FROM conversation 
+            WHERE contact_id = %s AND status = 'active'
+            ORDER BY started_at DESC LIMIT 1
+            """
+            cursor.execute(conversation_query, (contact_id,))
+            conversation = cursor.fetchone()
+            
+            if not conversation:
+                cursor.close()
+                return []
+                
+            conversation_id = conversation['id']
+            
+            # Buscar mensagens da conversa
             query = """
-            SELECT type, message, event_type, created_at 
-            FROM logs 
-            WHERE id_contact = %s 
-              AND DATE(created_at) = CURDATE()
-              AND event_type IN ('message_received', 'message_sent')
-              AND message IS NOT NULL
-            ORDER BY created_at DESC 
+            SELECT sender, message_text, message_type, timestamp 
+            FROM conversation_message 
+            WHERE conversation_id = %s 
+            ORDER BY timestamp DESC 
             LIMIT %s
             """
             
-            cursor.execute(query, (contact_id, limit))
+            cursor.execute(query, (conversation_id, limit))
             messages = cursor.fetchall()
             cursor.close()
             
@@ -709,16 +773,33 @@ class DatabaseManager:
         if not connection:
             return None
         try:
-            cursor = connection.cursor(dictionary=True)
-            query = """
-                SELECT * FROM conversation
-                WHERE contact_id = %s AND status = 'active'
-                ORDER BY started_at DESC LIMIT 1
-            """
-            cursor.execute(query, (contact_id,))
-            result = cursor.fetchone()
-            cursor.close()
-            return result
+            # Timeout específico para esta consulta
+            import signal
+            
+            def timeout_handler(signum, frame):
+                raise TimeoutError("Timeout na consulta get_active_conversation")
+            
+            # Configurar timeout de 10 segundos
+            signal.signal(signal.SIGALRM, timeout_handler)
+            signal.alarm(10)
+            
+            try:
+                cursor = connection.cursor(dictionary=True)
+                query = """
+                    SELECT * FROM conversation
+                    WHERE contact_id = %s AND status = 'active'
+                    ORDER BY started_at DESC LIMIT 1
+                """
+                cursor.execute(query, (contact_id,))
+                result = cursor.fetchone()
+                cursor.close()
+                return result
+            finally:
+                signal.alarm(0)  # Cancelar timeout
+                
+        except TimeoutError:
+            logger.error(f"⏰ Timeout na consulta get_active_conversation para contato {contact_id}")
+            return None
         except Exception as e:
             logger.error(f"Erro ao buscar conversa ativa: {e}")
             return None
@@ -850,18 +931,35 @@ class DatabaseManager:
         if not connection:
             return []
         try:
-            cursor = connection.cursor(dictionary=True)
-            query = """
-                SELECT sender, message_text, message_type, timestamp
-                FROM conversation_message
-                WHERE conversation_id = %s AND sender = 'user'
-                ORDER BY timestamp DESC
-                LIMIT %s
-            """
-            cursor.execute(query, (conversation_id, limit))
-            messages = cursor.fetchall()
-            cursor.close()
-            return messages
+            # Timeout específico para esta consulta
+            import signal
+            
+            def timeout_handler(signum, frame):
+                raise TimeoutError("Timeout na consulta get_last_user_messages")
+            
+            # Configurar timeout de 10 segundos
+            signal.signal(signal.SIGALRM, timeout_handler)
+            signal.alarm(10)
+            
+            try:
+                cursor = connection.cursor(dictionary=True)
+                query = """
+                    SELECT sender, message_text, message_type, timestamp
+                    FROM conversation_message
+                    WHERE conversation_id = %s AND sender = 'user'
+                    ORDER BY timestamp DESC
+                    LIMIT %s
+                """
+                cursor.execute(query, (conversation_id, limit))
+                messages = cursor.fetchall()
+                cursor.close()
+                return messages
+            finally:
+                signal.alarm(0)  # Cancelar timeout
+                
+        except TimeoutError:
+            logger.error(f"⏰ Timeout na consulta get_last_user_messages para conversa {conversation_id}")
+            return []
         except Exception as e:
             logger.error(f"Erro ao buscar mensagens do usuário da conversa: {e}")
             return []

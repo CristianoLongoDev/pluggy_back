@@ -74,6 +74,11 @@ log_info "🚀 Aplicando deployment no Kubernetes..."
 kubectl apply -f "${TEMP_DEPLOYMENT}"
 log_success "Deployment aplicado no Kubernetes"
 
+echo ""
+log_info "📊 Deletando pod:"
+kubectl delete pod -n whatsapp-webhook -l app=webhook-worker-optimized
+kubectl delete pod -n whatsapp-webhook -l app=message-worker-optimized
+
 # Etapa 6: Verificar status
 log_info "🔍 Verificando status dos pods..."
 sleep 5
