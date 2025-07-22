@@ -13,7 +13,7 @@ class WhatsAppService:
         self.app_id = "983764203018472"
         self.app_secret = "ae9b212c99dcb6a255e6dad2acc6b484"
         self.phone_number_id = "421769451025047"
-        self.api_version = "v17.0"
+        self.api_version = "v21.0"
         self.base_url = f"https://graph.facebook.com/{self.api_version}"
         self.messages_url = f"{self.base_url}/{self.phone_number_id}/messages"
         
@@ -364,6 +364,55 @@ class WhatsAppService:
                 pass
             
             return False
+    
+    def get_media_url(self, media_id):
+        """Obtém URL de download para um media_id do WhatsApp"""
+        try:
+            # Buscar token de acesso
+            access_token = self.get_access_token()
+            if not access_token:
+                logger.error("Token de acesso WhatsApp não disponível para obter URL de mídia")
+                return None
+            
+            # Configurar headers
+            headers = {
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json"
+            }
+            
+            # URL para obter informações da mídia
+            media_url = f"{self.base_url}/{media_id}"
+            
+            logger.info(f"Obtendo URL de download para media_id: {media_id}")
+            
+            # Fazer requisição para obter URL de download (timeout reduzido)
+            response = requests.get(
+                media_url,
+                headers=headers,
+                timeout=10  # Timeout mais agressivo para evitar travamentos
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                download_url = result.get('url')
+                
+                if download_url:
+                    logger.info(f"URL de download obtida com sucesso para {media_id}")
+                    return {
+                        "success": True,
+                        "download_url": download_url,
+                        "media_info": result
+                    }
+                else:
+                    logger.error(f"URL de download não encontrada na resposta: {result}")
+                    return None
+            else:
+                logger.error(f"Erro ao obter URL de mídia: {response.status_code} - {response.text}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Erro ao obter URL de mídia: {e}")
+            return None
 
 # Instância global do serviço WhatsApp
 whatsapp_service = WhatsAppService() 

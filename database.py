@@ -11,119 +11,92 @@ logger = logging.getLogger(__name__)
 
 class DatabaseManager:
     def __init__(self):
-        self.connection = None
         self.enabled = DB_ENABLED
         self._lock = threading.Lock()  # Para thread safety
         
-    def _get_connection(self, retry_count=0, max_retries=3):
-        """Obtém uma conexão ativa, reconectando se necessário"""
-        with self._lock:
-            try:
-                # Verifica se a conexão existe e está ativa
-                if (self.connection and 
-                    hasattr(self.connection, 'is_connected') and 
-                    self.connection.is_connected() and 
-                    self.connection.ping(reconnect=False, attempts=1)):
-                    return self.connection
-                
-                # Se não está conectado, tenta reconectar
-                if retry_count > 0:
-                    logger.info(f"Tentativa {retry_count}/{max_retries} de reconexão...")
-                else:
-                    logger.info("Conexão perdida, tentando reconectar...")
-                
-                if self.connection:
-                    try:
-                        self.connection.close()
-                    except:
-                        pass
-                
-                # Cria nova conexão
-                self.connection = mysql.connector.connect(
-                    host=DB_HOST,
-                    port=DB_PORT,
-                    database=DB_NAME,
-                    user=DB_USER,
-                    password=DB_PASSWORD,
-                    charset='utf8mb4',
-                    collation='utf8mb4_unicode_ci',
-                    autocommit=True,  # Auto-commit para evitar problemas
-                    pool_size=1,      # Pool simples
-                    pool_reset_session=True,
-                    connection_timeout=10  # Timeout de conexão
-                )
-                
-                if self.connection and hasattr(self.connection, 'is_connected') and self.connection.is_connected():
-                    logger.info("Reconectado ao banco MySQL com sucesso")
-                    return self.connection
-                else:
-                    logger.error("Falha ao reconectar ao banco")
-                    return None
-                    
-            except Error as e:
-                logger.error(f"Erro ao obter conexão: {e}")
-                
-                # Se ainda tem tentativas, aguarda e tenta novamente
-                if retry_count < max_retries:
-                    wait_time = (retry_count + 1) * 5  # 5s, 10s, 15s
-                    logger.info(f"Aguardando {wait_time}s antes da próxima tentativa...")
-                    time.sleep(wait_time)
-                    return self._get_connection(retry_count + 1, max_retries)
-                
+    def _create_fresh_connection(self):
+        """Cria uma nova conexão fresca para cada operação"""
+        if not self.enabled:
+            return None
+            
+        try:
+            logger.debug("🔌 Criando nova conexão com o banco...")
+            connection = mysql.connector.connect(
+                host=DB_HOST,
+                port=DB_PORT,
+                database=DB_NAME,
+                user=DB_USER,
+                password=DB_PASSWORD,
+                charset='utf8mb4',
+                collation='utf8mb4_unicode_ci',
+                autocommit=True,  # Auto-commit para evitar problemas
+                connection_timeout=3,  # Timeout agressivo de 3s
+                use_pure=True  # Usar implementação Python pura
+            )
+            
+            if connection and connection.is_connected():
+                logger.debug("✅ Nova conexão criada com sucesso")
+                return connection
+            else:
+                logger.error("❌ Falha ao criar conexão")
                 return None
+                
+        except Error as e:
+            logger.error(f"❌ Erro ao criar conexão: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"❌ Erro geral ao criar conexão: {e}")
+            return None
+    
+    def _execute_with_fresh_connection(self, operation, *args, **kwargs):
+        """Executa uma operação usando conexão fresca"""
+        connection = None
+        try:
+            connection = self._create_fresh_connection()
+            if not connection:
+                return None
+                
+            return operation(connection, *args, **kwargs)
+            
+        except Exception as e:
+            logger.error(f"❌ Erro na operação do banco: {e}")
+            return None
+        finally:
+            if connection:
+                try:
+                    connection.close()
+                    logger.debug("🔌 Conexão fechada")
+                except:
+                    pass
         
     def connect(self, initial_retry=True):
-        """Estabelece conexão inicial com o banco MySQL"""
+        """Testa se consegue conectar ao banco MySQL"""
         if not self.enabled:
             logger.info("Banco de dados desabilitado")
             return False
         
-        if initial_retry:
-            logger.info("Iniciando conexão com o banco MySQL...")
-            # Na inicialização, tenta por mais tempo
-            max_retries = 10  # 10 tentativas na inicialização
-            retry_count = 0
-            
-            while retry_count < max_retries:
-                connection = self._get_connection(retry_count, max_retries)
-                if connection:
-                    logger.info("Conexão inicial estabelecida com sucesso!")
-                    return True
-                
-                retry_count += 1
-                if retry_count < max_retries:
-                    wait_time = retry_count * 3  # 3s, 6s, 9s, etc.
-                    logger.info(f"Aguardando {wait_time}s antes da próxima tentativa de inicialização...")
-                    time.sleep(wait_time)
-            
-            logger.error("Falha ao conectar no banco após todas as tentativas")
-            return False
-        else:
-            connection = self._get_connection()
-            return connection is not None
+        logger.info("Testando conexão com o banco MySQL...")
+        
+        # Fazer teste de conexão simples
+        connection = self._create_fresh_connection()
+        if connection:
+            try:
+                connection.close()
+                logger.info("✅ Teste de conexão bem-sucedido!")
+                return True
+            except:
+                pass
+        
+        logger.error("❌ Falha no teste de conexão")
+        return False
             
     def disconnect(self):
-        """Fecha a conexão com o banco"""
-        try:
-            with self._lock:
-                if self.connection and hasattr(self.connection, 'is_connected') and self.connection.is_connected():
-                    self.connection.close()
-                    logger.info("Conexão com o banco MySQL fechada")
-                else:
-                    logger.debug("Conexão já estava fechada ou inválida")
-        except Exception as e:
-            logger.error(f"Erro ao fechar conexão: {e}")
+        """Não há mais conexão persistente para fechar"""
+        logger.info("ℹ️ Usando conexões por demanda - nada para desconectar")
         
     def create_table_if_not_exists(self):
         """Cria as tabelas logs e contacts se não existirem"""
-        if not self.enabled:
-            return False
-            
-        connection = self._get_connection()
-        if not connection:
-            return False
-            
-        try:
+        def _create_tables_operation(connection):
             cursor = connection.cursor()
             
             # Criar tabela logs
@@ -151,9 +124,11 @@ class DatabaseManager:
             CREATE TABLE IF NOT EXISTS contacts (
                 id VARCHAR(50) PRIMARY KEY,
                 name VARCHAR(255) NULL,
+                email VARCHAR(255) NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                 INDEX idx_name (name),
+                INDEX idx_email (email),
                 INDEX idx_created_at (created_at)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
             """
@@ -179,65 +154,12 @@ class DatabaseManager:
             connection.commit()
             cursor.close()
             
-            # Verificar e adicionar novos campos se necessário
-            self._update_table_structure()
-            
             return True
             
-        except Error as e:
-            logger.error(f"Erro ao criar tabelas: {e}")
-            return False
+        result = self._execute_with_fresh_connection(_create_tables_operation)
+        return result is not None
     
-    def _update_table_structure(self):
-        """Atualiza a estrutura das tabelas adicionando novos campos se necessário"""
-        if not self.enabled:
-            return False
-            
-        connection = self._get_connection()
-        if not connection:
-            return False
-            
-        try:
-            cursor = connection.cursor()
-            
-            # Atualizar tabela logs
-            cursor.execute("DESCRIBE logs")
-            existing_logs_columns = [column[0] for column in cursor.fetchall()]
-            
-            # Adicionar campo 'type' se não existir
-            if 'type' not in existing_logs_columns:
-                cursor.execute("ALTER TABLE logs ADD COLUMN type VARCHAR(20) NULL AFTER event_type")
-                cursor.execute("ALTER TABLE logs ADD INDEX idx_type (type)")
-                logger.info("Campo 'type' adicionado à tabela logs")
-            
-            # Adicionar campo 'message' se não existir
-            if 'message' not in existing_logs_columns:
-                cursor.execute("ALTER TABLE logs ADD COLUMN message TEXT NULL AFTER type")
-                logger.info("Campo 'message' adicionado à tabela logs")
-            
-            # Adicionar campo 'id_contact' se não existir
-            if 'id_contact' not in existing_logs_columns:
-                cursor.execute("ALTER TABLE logs ADD COLUMN id_contact VARCHAR(50) NULL AFTER message")
-                cursor.execute("ALTER TABLE logs ADD INDEX idx_id_contact (id_contact)")
-                logger.info("Campo 'id_contact' adicionado à tabela logs")
-            
-            # Atualizar tabela contacts
-            cursor.execute("DESCRIBE contacts")
-            existing_contacts_columns = [column[0] for column in cursor.fetchall()]
-            
-            # Adicionar campo 'email' se não existir
-            if 'email' not in existing_contacts_columns:
-                cursor.execute("ALTER TABLE contacts ADD COLUMN email VARCHAR(255) NULL AFTER name")
-                cursor.execute("ALTER TABLE contacts ADD INDEX idx_email (email)")
-                logger.info("Campo 'email' adicionado à tabela contacts")
-            
-            connection.commit()
-            cursor.close()
-            return True
-            
-        except Error as e:
-            logger.error(f"Erro ao atualizar estrutura das tabelas: {e}")
-            return False
+
     
     def migrate_existing_data(self, limit=1000):
         """Migra dados existentes para os novos campos estruturados"""
@@ -245,12 +167,7 @@ class DatabaseManager:
             logger.warning("Banco de dados desabilitado")
             return False
             
-        connection = self._get_connection()
-        if not connection:
-            logger.warning("Não foi possível conectar ao banco")
-            return False
-            
-        try:
+        def _migrate_existing_data_operation(connection):
             cursor = connection.cursor(dictionary=True)
             
             # Buscar registros que ainda não foram migrados (campos novos são NULL)
@@ -337,12 +254,8 @@ class DatabaseManager:
             logger.info(f"Migração concluída: {migrated_count} registros atualizados")
             return True
             
-        except Error as e:
-            logger.error(f"Erro durante a migração: {e}")
-            return False
-        except Exception as e:
-            logger.error(f"Erro geral durante a migração: {e}")
-            return False
+        result = self._execute_with_fresh_connection(_migrate_existing_data_operation)
+        return result is not None
             
     def upsert_contact(self, contact_id, contact_name=None):
         """Insere ou atualiza um contato na tabela contacts"""
@@ -354,12 +267,7 @@ class DatabaseManager:
             logger.warning("ID do contato é obrigatório")
             return False
             
-        connection = self._get_connection()
-        if not connection or not hasattr(connection, 'is_connected') or not connection.is_connected():
-            logger.warning("Não foi possível conectar ao banco ou conexão inválida")
-            return False
-            
-        try:
+        def _upsert_contact_operation(connection):
             cursor = connection.cursor()
             
             # Usar INSERT ... ON DUPLICATE KEY UPDATE para fazer upsert
@@ -378,23 +286,15 @@ class DatabaseManager:
             logger.info(f"Contato {contact_id} (nome: {contact_name}) inserido/atualizado com sucesso")
             return True
             
-        except Error as e:
-            logger.error(f"Erro ao inserir/atualizar contato: {e}")
-            return False
-        except Exception as e:
-            logger.error(f"Erro geral ao inserir/atualizar contato: {e}")
-            return False
+        result = self._execute_with_fresh_connection(_upsert_contact_operation)
+        return result is not None
             
     def update_contact_email(self, contact_id, email):
         """Atualiza o email de um contato na tabela contacts"""
         if not self.enabled:
             return False
             
-        connection = self._get_connection()
-        if not connection:
-            return False
-            
-        try:
+        def _update_contact_email_operation(connection):
             cursor = connection.cursor()
             
             # Primeiro, verificar se o contato existe
@@ -424,9 +324,8 @@ class DatabaseManager:
             cursor.close()
             return True
             
-        except Error as e:
-            logger.error(f"Erro ao atualizar email do contato {contact_id}: {e}")
-            return False
+        result = self._execute_with_fresh_connection(_update_contact_email_operation)
+        return result is not None
             
     def get_config(self, config_id):
         """Busca uma configuração por ID"""
@@ -434,12 +333,7 @@ class DatabaseManager:
             logger.warning("Banco de dados desabilitado")
             return None
             
-        connection = self._get_connection()
-        if not connection:
-            logger.warning("Não foi possível conectar ao banco")
-            return None
-            
-        try:
+        def _get_config_operation(connection):
             cursor = connection.cursor(dictionary=True)
             
             query = "SELECT value FROM config WHERE id = %s"
@@ -451,35 +345,12 @@ class DatabaseManager:
                 return json.loads(result['value']) if isinstance(result['value'], str) else result['value']
             return None
             
-        except Error as e:
-            logger.error(f"Erro ao buscar configuração {config_id}: {e}")
-            return None
+        result = self._execute_with_fresh_connection(_get_config_operation)
+        return result
     
     def get_config_fast(self, config_id):
-        """Busca uma configuração por ID sem tentar reconectar (para verificações rápidas)"""
-        if not self.enabled:
-            return None
-            
-        # Verifica apenas se há conexão existente e ativa
-        try:
-            if (self.connection and 
-                hasattr(self.connection, 'is_connected') and 
-                self.connection.is_connected()):
-                
-                cursor = self.connection.cursor(dictionary=True)
-                query = "SELECT value FROM config WHERE id = %s"
-                cursor.execute(query, (config_id,))
-                result = cursor.fetchone()
-                cursor.close()
-                
-                if result:
-                    return json.loads(result['value']) if isinstance(result['value'], str) else result['value']
-            
-            return None
-            
-        except Exception as e:
-            logger.warning(f"Erro rápido ao buscar configuração {config_id}: {e}")
-            return None
+        """Busca uma configuração por ID (agora usa mesmo método que get_config)"""
+        return self.get_config(config_id)
             
     def set_config(self, config_id, value, description=None):
         """Define uma configuração"""
@@ -487,12 +358,7 @@ class DatabaseManager:
             logger.warning("Banco de dados desabilitado")
             return False
             
-        connection = self._get_connection()
-        if not connection:
-            logger.warning("Não foi possível conectar ao banco")
-            return False
-            
-        try:
+        def _set_config_operation(connection):
             cursor = connection.cursor()
             
             upsert_query = """
@@ -512,9 +378,8 @@ class DatabaseManager:
             logger.info(f"Configuração {config_id} salva com sucesso")
             return True
             
-        except Exception as e:
-            logger.error(f"Erro ao salvar configuração {config_id}: {e}")
-            return False
+        result = self._execute_with_fresh_connection(_set_config_operation)
+        return result is not None
             
     def get_conversation_context(self, contact_id, limit=10):
         """Busca as últimas mensagens de um contato no dia atual"""
@@ -522,12 +387,7 @@ class DatabaseManager:
             logger.warning("Banco de dados desabilitado")
             return []
             
-        connection = self._get_connection()
-        if not connection:
-            logger.warning("Não foi possível conectar ao banco")
-            return []
-            
-        try:
+        def _get_conversation_context_operation(connection):
             cursor = connection.cursor(dictionary=True)
             
             # Buscar conversa ativa do contato
@@ -561,9 +421,8 @@ class DatabaseManager:
             # Inverter para ordem cronológica (mais antiga primeiro)
             return list(reversed(messages))
             
-        except Exception as e:
-            logger.error(f"Erro ao buscar contexto da conversa para {contact_id}: {e}")
-            return []
+        result = self._execute_with_fresh_connection(_get_conversation_context_operation)
+        return result
             
     def save_webhook_event(self, event_type, event_data):
         """Salva um evento do webhook no banco"""
@@ -571,12 +430,7 @@ class DatabaseManager:
             logger.warning("Banco de dados desabilitado")
             return False
             
-        connection = self._get_connection()
-        if not connection or not hasattr(connection, 'is_connected') or not connection.is_connected():
-            logger.warning("Não foi possível conectar ao banco ou conexão inválida")
-            return False
-            
-        try:
+        def _save_webhook_event_operation(connection):
             cursor = connection.cursor()
             
             # Extrair campos específicos para mensagens do WhatsApp
@@ -703,31 +557,15 @@ class DatabaseManager:
             logger.info(f"Evento {event_type} salvo no banco com sucesso - Tipo: {message_type}, De: {id_contact}, Mensagem: {message_content}")
             return True
             
-        except Error as e:
-            logger.error(f"Erro ao salvar evento no banco: {e}")
-            # Tenta reconectar em caso de erro
-            try:
-                if self.connection:
-                    self.connection.close()
-                    self.connection = None
-            except:
-                pass
-            return False
-        except Exception as e:
-            logger.error(f"Erro geral ao salvar evento no banco: {e}")
-            return False
+        result = self._execute_with_fresh_connection(_save_webhook_event_operation)
+        return result is not None
             
     def execute_query(self, query, params=None):
         """Executa uma query genérica com reconexão automática"""
         if not self.enabled:
             return None
             
-        connection = self._get_connection()
-        if not connection or not hasattr(connection, 'is_connected') or not connection.is_connected():
-            logger.warning("Não foi possível conectar ao banco ou conexão inválida")
-            return None
-            
-        try:
+        def _execute_query_operation(connection):
             cursor = connection.cursor(dictionary=True)
             
             if params:
@@ -740,39 +578,28 @@ class DatabaseManager:
             
             return result
             
-        except Error as e:
-            logger.error(f"Erro ao executar query: {e}")
-            # Tenta reconectar em caso de erro
-            try:
-                if self.connection:
-                    self.connection.close()
-                    self.connection = None
-            except:
-                pass
-            return None
-        except Exception as e:
-            logger.error(f"Erro geral ao executar query: {e}")
-            return None
+        result = self._execute_with_fresh_connection(_execute_query_operation)
+        return result
             
     def get_connection_status(self):
         """Retorna o status da conexão"""
         if not self.enabled:
             return "disabled"
         
-        connection = self._get_connection()
+        connection = self._create_fresh_connection()
         if connection:
-            return "connected"
-        else:
-            return "disconnected"
+            try:
+                connection.close()
+                return "connected"
+            except:
+                pass
+        return "disconnected"
 
     def get_active_conversation(self, contact_id):
         """Busca a conversa ativa de um contato. Retorna o registro ou None."""
         if not self.enabled:
             return None
-        connection = self._get_connection()
-        if not connection:
-            return None
-        try:
+        def _get_active_conversation_operation(connection):
             # Timeout específico para esta consulta
             import signal
             
@@ -797,21 +624,14 @@ class DatabaseManager:
             finally:
                 signal.alarm(0)  # Cancelar timeout
                 
-        except TimeoutError:
-            logger.error(f"⏰ Timeout na consulta get_active_conversation para contato {contact_id}")
-            return None
-        except Exception as e:
-            logger.error(f"Erro ao buscar conversa ativa: {e}")
-            return None
+        result = self._execute_with_fresh_connection(_get_active_conversation_operation)
+        return result
 
     def create_conversation(self, contact_id):
         """Cria uma nova conversa ativa para o contato e retorna o id."""
         if not self.enabled:
             return None
-        connection = self._get_connection()
-        if not connection:
-            return None
-        try:
+        def _create_conversation_operation(connection):
             cursor = connection.cursor()
             query = """
                 INSERT INTO conversation (contact_id, status, started_at)
@@ -822,18 +642,14 @@ class DatabaseManager:
             connection.commit()
             cursor.close()
             return conversation_id
-        except Exception as e:
-            logger.error(f"Erro ao criar conversa: {e}")
-            return None
+        result = self._execute_with_fresh_connection(_create_conversation_operation)
+        return result
 
     def close_conversation(self, conversation_id):
         """Fecha uma conversa (status = closed, define ended_at)."""
         if not self.enabled:
             return False
-        connection = self._get_connection()
-        if not connection:
-            return False
-        try:
+        def _close_conversation_operation(connection):
             cursor = connection.cursor()
             query = """
                 UPDATE conversation SET status = 'closed', ended_at = NOW()
@@ -843,41 +659,36 @@ class DatabaseManager:
             connection.commit()
             cursor.close()
             return True
-        except Exception as e:
-            logger.error(f"Erro ao fechar conversa: {e}")
-            return False
+        result = self._execute_with_fresh_connection(_close_conversation_operation)
+        return result is not None
 
     def insert_conversation_message(self, conversation_id, message_text, sender, message_type, timestamp=None):
         """Insere uma mensagem na tabela conversation_message."""
         if not self.enabled:
             return False
-        connection = self._get_connection()
-        if not connection:
-            return False
-        try:
+        
+        # Garantir que timestamp está definido antes de passar para a função interna
+        if not timestamp:
+            timestamp = datetime.now(timezone.utc)
+            
+        def _insert_conversation_message_operation(connection):
             cursor = connection.cursor()
             query = """
                 INSERT INTO conversation_message (conversation_id, message_text, sender, message_type, timestamp)
                 VALUES (%s, %s, %s, %s, %s)
             """
-            if not timestamp:
-                timestamp = datetime.now(timezone.utc)
             cursor.execute(query, (conversation_id, message_text, sender, message_type, timestamp))
             connection.commit()
             cursor.close()
             return True
-        except Exception as e:
-            logger.error(f"Erro ao inserir mensagem na conversa: {e}")
-            return False
+        result = self._execute_with_fresh_connection(_insert_conversation_message_operation)
+        return result is not None
 
     def insert_conversation_attach(self, conversation_id, file_url, file_type, file_name=None):
         """Insere um anexo na tabela conversation_attach."""
         if not self.enabled:
             return False
-        connection = self._get_connection()
-        if not connection:
-            return False
-        try:
+        def _insert_conversation_attach_operation(connection):
             cursor = connection.cursor()
             if file_name is not None:
                 query = """
@@ -894,18 +705,14 @@ class DatabaseManager:
             connection.commit()
             cursor.close()
             return True
-        except Exception as e:
-            logger.error(f"Erro ao inserir anexo na conversa: {e}")
-            return False
+        result = self._execute_with_fresh_connection(_insert_conversation_attach_operation)
+        return result is not None
 
     def get_conversation_messages(self, conversation_id, limit=10):
         """Busca as últimas mensagens de uma conversa (ordem cronológica)."""
         if not self.enabled:
             return []
-        connection = self._get_connection()
-        if not connection:
-            return []
-        try:
+        def _get_conversation_messages_operation(connection):
             cursor = connection.cursor(dictionary=True)
             query = """
                 SELECT sender, message_text, message_type, timestamp
@@ -919,18 +726,14 @@ class DatabaseManager:
             cursor.close()
             # Retornar em ordem cronológica (mais antiga primeiro)
             return list(reversed(messages))
-        except Exception as e:
-            logger.error(f"Erro ao buscar mensagens da conversa: {e}")
-            return []
+        result = self._execute_with_fresh_connection(_get_conversation_messages_operation)
+        return result
 
     def get_last_user_messages(self, conversation_id, limit=1):
         """Busca as últimas mensagens do usuário (sender='user') de uma conversa."""
         if not self.enabled:
             return []
-        connection = self._get_connection()
-        if not connection:
-            return []
-        try:
+        def _get_last_user_messages_operation(connection):
             # Timeout específico para esta consulta
             import signal
             
@@ -957,21 +760,14 @@ class DatabaseManager:
             finally:
                 signal.alarm(0)  # Cancelar timeout
                 
-        except TimeoutError:
-            logger.error(f"⏰ Timeout na consulta get_last_user_messages para conversa {conversation_id}")
-            return []
-        except Exception as e:
-            logger.error(f"Erro ao buscar mensagens do usuário da conversa: {e}")
-            return []
+        result = self._execute_with_fresh_connection(_get_last_user_messages_operation)
+        return result
 
     def get_contact(self, contact_id):
         """Busca um contato pelo contact_id na tabela contacts."""
         if not self.enabled:
             return None
-        connection = self._get_connection()
-        if not connection:
-            return None
-        try:
+        def _get_contact_operation(connection):
             cursor = connection.cursor(dictionary=True)
             query = """
                 SELECT * FROM contacts WHERE id = %s
@@ -980,18 +776,14 @@ class DatabaseManager:
             contact = cursor.fetchone()
             cursor.close()
             return contact
-        except Exception as e:
-            logger.error(f"Erro ao buscar contato: {e}")
-            return None
+        result = self._execute_with_fresh_connection(_get_contact_operation)
+        return result
 
     def has_agent_response_for_contact(self, contact_id):
         """Verifica se o contato já recebeu alguma resposta do agente em qualquer conversa."""
         if not self.enabled:
             return False
-        connection = self._get_connection()
-        if not connection:
-            return False
-        try:
+        def _has_agent_response_for_contact_operation(connection):
             cursor = connection.cursor()
             query = """
                 SELECT 1
@@ -1004,9 +796,8 @@ class DatabaseManager:
             result = cursor.fetchone()
             cursor.close()
             return result is not None
-        except Exception as e:
-            logger.error(f"Erro ao verificar se contato já tem resposta do agente: {e}")
-            return False
+        result = self._execute_with_fresh_connection(_has_agent_response_for_contact_operation)
+        return result is not None
 
 # Instância global do gerenciador de banco
 db_manager = DatabaseManager() 

@@ -64,9 +64,9 @@ class WebhookWorker:
             def timeout_handler(signum, frame):
                 raise TimeoutError(f"Timeout no processamento de {event_type}")
             
-            # Configurar timeout geral de 2 minutos para qualquer operação
+            # Configurar timeout geral de 30 segundos (mais agressivo para detectar travamentos)
             signal.signal(signal.SIGALRM, timeout_handler)
-            signal.alarm(120)
+            signal.alarm(30)
             
             try:
                 # Salvar no banco de dados se disponível (logs antigos)
@@ -160,27 +160,147 @@ class WebhookWorker:
                                 time.sleep(1)
                         
                         # Inserir mensagem se tiver dados válidos
-                        if conversation_id and message_text:
-                            logger.info(f"💾 Salvando mensagem na conversation_message: conversa_id={conversation_id}, sender={sender}")
-                            for msg_attempt in range(3):
-                                try:
-                                    success = db_manager.insert_conversation_message(
-                                        conversation_id=conversation_id,
-                                        message_text=message_text,
-                                        sender=sender,
-                                        message_type=message_type,
-                                        timestamp=dt_timestamp
-                                    )
-                                    if success:
-                                        logger.info(f"✅ Mensagem salva com sucesso na conversation_message")
-                                        break
-                                    else:
-                                        logger.error(f"❌ Falha ao salvar mensagem na conversation_message (tentativa {msg_attempt + 1})")
-                                except Exception as msg_error:
-                                    logger.warning(f"Erro ao salvar mensagem (tentativa {msg_attempt + 1}): {msg_error}")
-                                    time.sleep(1)
+                        if conversation_id:
+                            logger.info(f"🔍 DEBUG - conversation_id={conversation_id}, message_type='{message_type}', sender='{sender}', message_text='{message_text}'")
+                            
+                            # REGRA ESPECIAL: Imagens e Documentos  
+                            if message_type in ['image', 'document'] and sender == 'user':
+                                logger.info(f"📎 Processando {message_type} de {sender}")
+                                
+                                # 1. Salvar caption se existir (como mensagem de texto)
+                                if message_text and message_text.strip():
+                                    logger.info(f"💾 Salvando caption como mensagem de texto: {message_text[:50]}...")
+                                    for msg_attempt in range(3):
+                                        try:
+                                            success = db_manager.insert_conversation_message(
+                                                conversation_id=conversation_id,
+                                                message_text=message_text,
+                                                sender=sender,
+                                                message_type='text',  # Caption é salvo como text
+                                                timestamp=dt_timestamp
+                                            )
+                                            if success:
+                                                logger.info(f"✅ Caption salvo como mensagem de texto")
+                                                break
+                                            else:
+                                                logger.error(f"❌ Falha ao salvar caption (tentativa {msg_attempt + 1})")
+                                        except Exception as msg_error:
+                                            logger.warning(f"Erro ao salvar caption (tentativa {msg_attempt + 1}): {msg_error}")
+                                            time.sleep(1)
+                                else:
+                                    logger.info(f"📎 {message_type.capitalize()} sem caption - apenas salvando contexto")
+                                
+                                # 2. Salvar anexo na tabela conversation_attach
+                                if media_id:
+                                    logger.info(f"💾 Obtendo URL de download para media_id={media_id}")
+                                    
+                                    # Obter URL de download real da API do WhatsApp (com timeout robusto)
+                                    try:
+                                        import signal
+                                        
+                                        def url_timeout_handler(signum, frame):
+                                            raise TimeoutError("Timeout ao obter URL de mídia")
+                                        
+                                        # Timeout de 15 segundos para operação completa
+                                        signal.signal(signal.SIGALRM, url_timeout_handler)
+                                        signal.alarm(15)
+                                        
+                                        try:
+                                            from whatsapp_service import whatsapp_service
+                                            media_info = whatsapp_service.get_media_url(media_id)
+                                            
+                                            if media_info and media_info.get('success'):
+                                                download_url = media_info['download_url']
+                                                logger.info(f"✅ URL de download obtida: {download_url[:50]}...")
+                                            else:
+                                                logger.warning(f"⚠️ Falha ao obter URL, usando media_id como fallback")
+                                                download_url = media_id  # Fallback para media_id
+                                        finally:
+                                            signal.alarm(0)  # Cancelar timeout
+                                            
+                                    except TimeoutError:
+                                        logger.error(f"⏰ Timeout ao obter URL de mídia - usando media_id como fallback")
+                                        download_url = media_id  # Fallback para media_id
+                                    except Exception as url_error:
+                                        logger.error(f"❌ Erro ao obter URL de mídia: {url_error}")
+                                        download_url = media_id  # Fallback para media_id
+                                    
+                                    # Salvar anexo com URL real
+                                    logger.info(f"💾 Salvando anexo na conversation_attach: url={download_url[:50]}..., tipo={message_type}")
+                                    for attach_attempt in range(3):
+                                        try:
+                                            success = db_manager.insert_conversation_attach(
+                                                conversation_id=conversation_id,
+                                                file_url=download_url,  # URL real de download
+                                                file_type=message_type,
+                                                file_name=file_name
+                                            )
+                                            if success:
+                                                logger.info(f"✅ Anexo salvo na conversation_attach")
+                                                break
+                                            else:
+                                                logger.error(f"❌ Falha ao salvar anexo (tentativa {attach_attempt + 1})")
+                                        except Exception as attach_error:
+                                            logger.warning(f"Erro ao salvar anexo (tentativa {attach_attempt + 1}): {attach_error}")
+                                            time.sleep(1)
+                                else:
+                                    logger.warning(f"⚠️ media_id não encontrado para {message_type}")
+                                
+                                # 3. SEMPRE salvar mensagem de contexto sobre o arquivo anexado
+                                arquivo_nome = file_name if file_name else f"arquivo.{message_type}"
+                                
+                                # Mensagem específica por tipo
+                                if message_type == 'image':
+                                    contexto_mensagem = f"Usuário anexou imagem {arquivo_nome}"
+                                elif message_type == 'document':
+                                    contexto_mensagem = f"Usuário anexou documento {arquivo_nome}"
+                                else:
+                                    contexto_mensagem = f"Usuário anexou {message_type} {arquivo_nome}"
+                                
+                                logger.info(f"💾 Salvando mensagem de contexto: {contexto_mensagem}")
+                                logger.info(f"🔍 CONTEXTO-DEBUG: conversation_id={conversation_id}, sender='{sender}', message_type='text'")
+                                for ctx_attempt in range(3):
+                                    try:
+                                        success = db_manager.insert_conversation_message(
+                                            conversation_id=conversation_id,
+                                            message_text=contexto_mensagem,
+                                            sender=sender,
+                                            message_type='text',  # Contexto como text para contar no delay
+                                            timestamp=dt_timestamp
+                                        )
+                                        if success:
+                                            logger.info(f"✅ Mensagem de contexto salva com sucesso")
+                                            break
+                                        else:
+                                            logger.error(f"❌ Falha ao salvar contexto (tentativa {ctx_attempt + 1})")
+                                    except Exception as ctx_error:
+                                        logger.warning(f"Erro ao salvar contexto (tentativa {ctx_attempt + 1}): {ctx_error}")
+                                        time.sleep(1)
+                            
+                            # REGRA NORMAL: Mensagens de texto e outras (não imagem/documento)
+                            elif message_text and message_text.strip():
+                                logger.info(f"💾 Salvando mensagem na conversation_message: conversa_id={conversation_id}, sender={sender}")
+                                for msg_attempt in range(3):
+                                    try:
+                                        success = db_manager.insert_conversation_message(
+                                            conversation_id=conversation_id,
+                                            message_text=message_text,
+                                            sender=sender,
+                                            message_type=message_type,
+                                            timestamp=dt_timestamp
+                                        )
+                                        if success:
+                                            logger.info(f"✅ Mensagem salva com sucesso na conversation_message")
+                                            break
+                                        else:
+                                            logger.error(f"❌ Falha ao salvar mensagem na conversation_message (tentativa {msg_attempt + 1})")
+                                    except Exception as msg_error:
+                                        logger.warning(f"Erro ao salvar mensagem (tentativa {msg_attempt + 1}): {msg_error}")
+                                        time.sleep(1)
+                            else:
+                                logger.warning(f"⚠️ Mensagem sem texto válido (tipo: {message_type}) - não é imagem/documento, não salvando")
                         else:
-                            logger.warning(f"⚠️ message_text está vazio ou conversation_id inválido, não salvando na conversation_message")
+                            logger.warning(f"⚠️ conversation_id inválido, não salvando mensagem")
                             
                     except Exception as conv_error:
                         logger.error(f"❌ Erro não crítico ao processar estrutura de conversa: {conv_error}")
@@ -706,25 +826,15 @@ class WebhookWorker:
                         time.sleep(health_check_interval)
                         current_time = time.time()
                         
-                        # Verificar se não está processando há muito tempo
+                        # Verificar se não está processando há muito tempo (apenas para logging)
                         idle_time = current_time - last_message_time
                         if idle_time > max_idle_time:
                             logger.warning(f"⚠️ Worker idle há {idle_time:.0f}s (>{max_idle_time}s)")
                             
-                            # Verificar se há mensagens na fila
-                            try:
-                                queue_info = rabbitmq_manager.channel.queue_declare(queue=queue_name, passive=True)
-                                message_count = queue_info.method.message_count
-                                
-                                if message_count > 0:
-                                    logger.error(f"💀 {message_count} mensagens na fila mas worker idle! Tentando recovery...")
-                                    self._attempt_recovery()
-                                    last_message_time = current_time  # Reset timer
-                                else:
-                                    logger.info(f"✅ Fila vazia, idle normal")
-                                    
-                            except Exception as queue_check_error:
-                                logger.error(f"❌ Erro ao verificar fila: {queue_check_error}")
+                            # REMOVIDO: Recovery automático por idle time (estava causando crashes)
+                            # Idle é comportamento normal quando não há mensagens
+                            # Recovery será feito apenas por falhas consecutivas de processamento
+                            logger.info(f"✅ Idle é normal quando não há mensagens - worker aguardando...")
                         
                         # Log de estatísticas a cada 5 minutos
                         if self.processed_count > 0 and self.processed_count % 100 == 0:
