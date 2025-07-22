@@ -115,6 +115,12 @@ class WebhookWorker:
                                 # Só usar caption se existir e não for vazio
                                 caption = img.get('caption')
                                 message_text = caption if caption and caption.strip() else None
+                            elif message_type == 'audio':
+                                audio = event_data.get('audio', {})
+                                media_id = audio.get('id')
+                                media_type = audio.get('mime_type')
+                                file_name = audio.get('filename') if 'filename' in audio else f"audio.{media_type.split('/')[-1] if media_type else 'ogg'}"
+                                message_text = None  # Será preenchido com transcrição depois
                             msg_timestamp = event_data.get('timestamp')
                         elif event_type == 'message_sent':
                             contact_id = event_data.get('to')
@@ -163,8 +169,8 @@ class WebhookWorker:
                         if conversation_id:
                             logger.info(f"🔍 DEBUG - conversation_id={conversation_id}, message_type='{message_type}', sender='{sender}', message_text='{message_text}'")
                             
-                            # REGRA ESPECIAL: Imagens e Documentos  
-                            if message_type in ['image', 'document'] and sender == 'user':
+                            # REGRA ESPECIAL: Imagens, Documentos e Áudios  
+                            if message_type in ['image', 'document', 'audio'] and sender == 'user':
                                 logger.info(f"📎 Processando {message_type} de {sender}")
                                 
                                 # 1. Salvar caption se existir (como mensagem de texto)
@@ -189,6 +195,46 @@ class WebhookWorker:
                                             time.sleep(1)
                                 else:
                                     logger.info(f"📎 {message_type.capitalize()} sem caption - apenas salvando contexto")
+                                
+                                # REGRA ESPECIAL PARA ÁUDIO: Transcrever antes de salvar anexo
+                                transcricao_audio = None
+                                if message_type == 'audio' and media_id:
+                                    logger.info(f"🎙️ Processando transcrição de áudio...")
+                                    try:
+                                        from audio_transcription_service import audio_transcription_service
+                                        from whatsapp_service import whatsapp_service
+                                        
+                                        # Obter URL do áudio primeiro
+                                        media_info = whatsapp_service.get_media_url(media_id)
+                                        if media_info and media_info.get('success'):
+                                            audio_url = media_info['download_url']
+                                            logger.info(f"✅ URL de áudio obtida: {audio_url[:50]}...")
+                                            
+                                            # Obter token de acesso para download autenticado
+                                            access_token = whatsapp_service.get_access_token()
+                                            
+                                            # Transcrever áudio (com autenticação)
+                                            transcription_result = audio_transcription_service.process_audio_message(audio_url, access_token)
+                                            if transcription_result and transcription_result.get('success'):
+                                                transcricao_audio = transcription_result['transcription']
+                                                logger.info(f"🎉 Transcrição: {transcricao_audio[:100]}...")
+                                                
+                                                # Salvar transcrição como mensagem de texto
+                                                success = db_manager.insert_conversation_message(
+                                                    conversation_id=conversation_id,
+                                                    message_text=transcricao_audio,
+                                                    sender=sender,
+                                                    message_type='text',
+                                                    timestamp=dt_timestamp
+                                                )
+                                                if success:
+                                                    logger.info(f"✅ Transcrição salva como texto")
+                                            else:
+                                                logger.error(f"❌ Falha na transcrição")
+                                        else:
+                                            logger.error(f"❌ Falha ao obter URL do áudio")
+                                    except Exception as transcription_error:
+                                        logger.error(f"❌ Erro na transcrição: {transcription_error}")
                                 
                                 # 2. Salvar anexo na tabela conversation_attach
                                 if media_id:
@@ -254,6 +300,11 @@ class WebhookWorker:
                                     contexto_mensagem = f"Usuário anexou imagem {arquivo_nome}"
                                 elif message_type == 'document':
                                     contexto_mensagem = f"Usuário anexou documento {arquivo_nome}"
+                                elif message_type == 'audio':
+                                    if transcricao_audio:
+                                        contexto_mensagem = f"Usuário enviou áudio {arquivo_nome} (transcrito acima)"
+                                    else:
+                                        contexto_mensagem = f"Usuário enviou áudio {arquivo_nome} (transcrição falhou)"
                                 else:
                                     contexto_mensagem = f"Usuário anexou {message_type} {arquivo_nome}"
                                 

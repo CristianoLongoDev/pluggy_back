@@ -41,7 +41,7 @@ class ChatGPTService:
                 contact = db_manager.get_contact(contact_id)
                 contact_exists = contact is not None
                 has_email = contact and contact.get('email') and contact.get('email').strip()
-                
+
                 # É primeiro contato REAL apenas se: contato não existe OU (contato existe mas nunca teve conversa com agent)
                 is_first_contact = not contact_exists or (contact_exists and not has_email and not has_agent_messages_current)
                 
@@ -149,7 +149,7 @@ class ChatGPTService:
                 else:
                     logger.warning(f"Sender desconhecido '{sender}' na mensagem {i+1}, ignorando...")
                     continue  # Pular mensagens com sender inválido
-                
+                    
                 conversation_list.append({
                     "role": role,
                     "content": str(message_text)
@@ -243,14 +243,14 @@ class ChatGPTService:
                 else:
                     # Resposta normal de texto
                     chatgpt_response = message['content'].strip()
-                    logger.info(f"ChatGPT respondeu para {contact_id}: {chatgpt_response[:50]}...")
-                    
-                    return {
-                        "success": True,
-                        "response": chatgpt_response,
-                        "raw_data": result,
-                        "tokens_used": result.get('usage', {}).get('total_tokens', 0)
-                    }
+                logger.info(f"ChatGPT respondeu para {contact_id}: {chatgpt_response[:50]}...")
+                
+                return {
+                    "success": True,
+                    "response": chatgpt_response,
+                    "raw_data": result,
+                    "tokens_used": result.get('usage', {}).get('total_tokens', 0)
+                }
             
             else:
                 logger.error(f"Erro na API ChatGPT: {response.status_code} - {response.text}")
