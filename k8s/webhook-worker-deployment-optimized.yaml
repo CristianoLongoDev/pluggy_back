@@ -32,6 +32,11 @@ spec:
             secretKeyRef:
               name: whatsapp-webhook-secret
               key: WEBHOOK_VERIFY_TOKEN
+        - name: MOVIDESK_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: whatsapp-webhook-secret
+              key: MOVIDESK_TOKEN
         - name: DB_HOST
           value: "168.75.106.98"
         - name: DB_PORT

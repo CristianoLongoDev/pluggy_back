@@ -326,6 +326,44 @@ class ChatGPTService:
             if success:
                 logger.info(f"Email {email} salvo com sucesso para contato {contact_id}")
                 
+                # Integração com Movidesk - buscar ou criar pessoa
+                logger.info(f"🔗 INICIANDO integração Movidesk para {email}")
+                try:
+                    from movidesk_service import movidesk_service
+                    logger.info(f"🔗 Movidesk service importado com sucesso")
+                    
+                    # Verificar se token está configurado
+                    if not movidesk_service.token:
+                        logger.error(f"🔗 ❌ Token da Movidesk não configurado - pulando integração")
+                    else:
+                        logger.info(f"🔗 ✅ Token da Movidesk configurado")
+                        
+                        # Obter nome do contato para a Movidesk
+                        contact = db_manager.get_contact(contact_id)
+                        contact_name = contact.get('name') if contact else contact_id
+                        logger.info(f"🔗 Nome do contato: {contact_name}")
+                        
+                        # Buscar ou criar pessoa na Movidesk
+                        logger.info(f"🔗 Chamando get_or_create_person({contact_name}, {email})")
+                        person_id = movidesk_service.get_or_create_person(contact_name, email)
+                        
+                        if person_id:
+                            logger.info(f"🔗 ✅ Person_id obtido da Movidesk: {person_id}")
+                            # Atualizar person_id no banco
+                            person_update_success = db_manager.update_contact_person_id(contact_id, person_id)
+                            if person_update_success:
+                                logger.info(f"🔗 ✅ Person_id {person_id} da Movidesk salvo para contato {contact_id}")
+                            else:
+                                logger.error(f"🔗 ❌ Falha ao salvar person_id da Movidesk para contato {contact_id}")
+                        else:
+                            logger.error(f"🔗 ❌ Não foi possível obter person_id da Movidesk para {email}")
+                        
+                except Exception as movidesk_error:
+                    logger.error(f"🔗 ❌ ERRO na integração com Movidesk para {email}: {movidesk_error}")
+                    import traceback
+                    logger.error(f"🔗 ❌ Traceback: {traceback.format_exc()}")
+                    # Não falha o processo principal, apenas log do erro
+                
                 # Adicionar ao cache para evitar futuras consultas ao banco
                 self._email_cache.add(contact_id)
                 logger.info(f"Email registrado - adicionando {contact_id} ao cache")

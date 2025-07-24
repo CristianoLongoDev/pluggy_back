@@ -125,16 +125,36 @@ class DatabaseManager:
                 id VARCHAR(50) PRIMARY KEY,
                 name VARCHAR(255) NULL,
                 email VARCHAR(255) NULL,
+                person_id VARCHAR(50) NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                 INDEX idx_name (name),
                 INDEX idx_email (email),
+                INDEX idx_person_id (person_id),
                 INDEX idx_created_at (created_at)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
             """
             
             cursor.execute(create_contacts_table_query)
             logger.info("Tabela contacts verificada/criada com sucesso")
+            
+            # Criar tabela company_relationship
+            create_company_relationship_table_query = """
+            CREATE TABLE IF NOT EXISTS company_relationship (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                domain VARCHAR(255) NOT NULL UNIQUE,
+                company_id VARCHAR(50) NOT NULL,
+                company_name VARCHAR(255) NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                INDEX idx_domain (domain),
+                INDEX idx_company_id (company_id),
+                INDEX idx_created_at (created_at)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+            """
+            
+            cursor.execute(create_company_relationship_table_query)
+            logger.info("Tabela company_relationship verificada/criada com sucesso")
             
             # Criar tabela config
             create_config_table_query = """
@@ -325,6 +345,29 @@ class DatabaseManager:
             return True
             
         result = self._execute_with_fresh_connection(_update_contact_email_operation)
+        return result is not None
+        
+    def update_contact_person_id(self, contact_id, person_id):
+        """Atualiza o person_id de um contato na tabela contacts"""
+        if not self.enabled:
+            return False
+            
+        def _update_contact_person_id_operation(connection):
+            cursor = connection.cursor()
+            
+            update_query = """
+                UPDATE contacts 
+                SET person_id = %s, updated_at = NOW() 
+                WHERE id = %s
+            """
+            cursor.execute(update_query, (person_id, contact_id))
+            connection.commit()
+            cursor.close()
+            
+            logger.info(f"Person_id {person_id} atualizado para contato {contact_id}")
+            return True
+            
+        result = self._execute_with_fresh_connection(_update_contact_person_id_operation)
         return result is not None
             
     def get_config(self, config_id):

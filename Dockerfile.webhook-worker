@@ -48,6 +48,7 @@ COPY config.py .
 COPY chatgpt_service.py .
 COPY whatsapp_service.py .
 COPY whatsapp_token_manager.py .
+COPY movidesk_service.py .
 COPY audio_transcription_service.py .
 
 # Criar diretório para logs com permissões adequadas

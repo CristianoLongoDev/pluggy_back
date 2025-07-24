@@ -97,6 +97,12 @@ class WebhookWorker:
                             contact_id = event_data.get('from')
                             sender = 'user'
                             message_type = event_data.get('type', 'unknown')
+                            
+                            # Filtrar reações - não criar conversa para reações
+                            if message_type == 'reaction':
+                                logger.info(f"🔇 Mensagem do tipo 'reaction' de {contact_id} ignorada - não criando conversa")
+                                return True  # Retorna sucesso mas sem processar
+                            
                             if message_type == 'text':
                                 message_text = event_data.get('text', {}).get('body')
                             elif message_type == 'document':

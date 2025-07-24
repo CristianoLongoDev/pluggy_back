@@ -62,4 +62,9 @@ WEBHOOK_QUEUE = 'webhook_messages'
 MESSAGE_QUEUE = 'processed_messages'
 STATUS_QUEUE = 'status_updates'
 ERROR_QUEUE = 'error_messages'
-CHATGPT_DELAY_QUEUE = 'chatgpt_delay_check' 
+CHATGPT_DELAY_QUEUE = 'chatgpt_delay_check'
+
+# Configurações da Movidesk
+MOVIDESK_TOKEN = os.getenv('MOVIDESK_TOKEN', '')
+MOVIDESK_API_URL = 'https://api.movidesk.com/public/v1'
+MOVIDESK_PERSONS_ENDPOINT = f'{MOVIDESK_API_URL}/persons' 
