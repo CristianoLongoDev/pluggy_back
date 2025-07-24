@@ -20,10 +20,47 @@ spec:
   - host: atendimento.pluggerbi.com
     http:
       paths:
-      - path: /
+      # Rotas da API
+      - path: /api
         pathType: Prefix
         backend:
           service:
             name: whatsapp-webhook-service
+            port:
+              number: 80
+      - path: /webhook
+        pathType: Prefix
+        backend:
+          service:
+            name: whatsapp-webhook-service
+            port:
+              number: 80
+      - path: /health
+        pathType: Prefix
+        backend:
+          service:
+            name: whatsapp-webhook-service
+            port:
+              number: 80
+      - path: /logs
+        pathType: Prefix
+        backend:
+          service:
+            name: whatsapp-webhook-service
+            port:
+              number: 80
+      - path: /rabbitmq
+        pathType: Prefix
+        backend:
+          service:
+            name: whatsapp-webhook-service
+            port:
+              number: 80
+      # Frontend (deve ser por último)
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: whatsapp-frontend-service
             port:
               number: 80 

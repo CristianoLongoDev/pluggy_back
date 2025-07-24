@@ -36,9 +36,10 @@ def detect_environment():
 # Configurações do Banco de Dados MySQL com detecção automática de ambiente
 ENVIRONMENT = detect_environment()
 
-# IP do banco MySQL - usando IP externo para ambos os ambientes
-# O IP interno 10.0.10.75 pode não estar acessível
-DEFAULT_DB_HOST = '168.75.106.98'  # IP externo para todos os ambientes
+# IP do banco MySQL - usando IP privado para melhor performance dentro do cluster K8s
+# Alterado de IP externo (168.75.106.98) para IP privado (10.0.10.69) 
+# para otimizar conectividade entre pods no Kubernetes
+DEFAULT_DB_HOST = '10.0.10.69'  # IP privado - melhor performance no cluster
 
 DB_HOST = os.getenv('DB_HOST', DEFAULT_DB_HOST)
 DB_PORT = int(os.getenv('DB_PORT', 6446))

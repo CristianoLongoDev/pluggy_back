@@ -1,4 +1,4 @@
-from flask import Flask, jsonify, request, send_from_directory, redirect, render_template_string
+from flask import Flask, jsonify, request, redirect, render_template_string
 from flask_cors import CORS
 import json
 import logging
@@ -34,9 +34,20 @@ def close_database_connection(exception=None):
 @app.route('/')
 def home():
     """
-    Rota principal - sempre serve o frontend
+    Rota principal da API - informações básicas
     """
-    return send_from_directory('frontend', 'index.html')
+    return jsonify({
+        "message": "WhatsApp Webhook API",
+        "status": "active",
+        "version": "1.0.0",
+        "endpoints": {
+            "/api": "API principal",
+            "/health": "Health check",
+            "/webhook": "Webhook do WhatsApp",
+            "/logs": "Consultar logs",
+            "/rabbitmq/status": "Status do RabbitMQ"
+        }
+    })
 
 @app.route('/api')
 def api():

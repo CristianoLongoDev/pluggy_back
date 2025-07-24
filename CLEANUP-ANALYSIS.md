@@ -29,8 +29,8 @@
 
 #### 🚀 **Scripts de Build/Deploy Otimizados**
 ```
-✅ build-webhook-worker.sh           # Build worker otimizado
-✅ build-rabbitmq.sh                 # Build RabbitMQ customizado
+🗑️ build-webhook-worker.sh           # REMOVIDO: redundante com deploy-webhook-worker-dockerhub.sh
+🗑️ build-rabbitmq.sh                 # REMOVIDO: redundante com deploy-rabbitmq-dockerhub.sh
 ✅ deploy-webhook-worker-dockerhub.sh # Deploy worker completo
 ✅ deploy-rabbitmq-dockerhub.sh       # Deploy RabbitMQ completo
 ```

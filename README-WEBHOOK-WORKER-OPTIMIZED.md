@@ -24,23 +24,18 @@ Esta é uma solução otimizada para o webhook worker que reduz significativamen
 
 ## 🔧 Como Usar
 
-### 1. Construir a Imagem
+### 1. Deploy Completo (Recomendado)
 
 ```bash
-# Construir a imagem localmente
-./build-webhook-worker.sh
-
-# Ou com tag específica
-./build-webhook-worker.sh v1.0
-
-# Construir e fazer push para registry
-./build-webhook-worker.sh latest localhost:5000 --push
+# Build + Push + Deploy automático
+./deploy-webhook-worker-dockerhub.sh
+# Este script faz tudo: constrói a imagem, faz push para Docker Hub e deploy no Kubernetes
 ```
 
-### 2. Deploy no Kubernetes
+### 2. Deploy Manual (Apenas Kubernetes)
 
 ```bash
-# Aplicar o deployment otimizado
+# Se a imagem já estiver no Docker Hub, aplicar apenas o deployment
 kubectl apply -f k8s/webhook-worker-deployment-optimized.yaml
 
 # Verificar status
@@ -69,7 +64,7 @@ kubectl delete deployment message-worker -n whatsapp-webhook
 ```
 ├── Dockerfile.webhook-worker              # Dockerfile otimizado com multi-stage build
 ├── requirements-worker.txt                # Dependências mínimas para o worker
-├── build-webhook-worker.sh               # Script de build da imagem
+├── deploy-webhook-worker-dockerhub.sh    # Script completo: build + push + deploy
 ├── k8s/webhook-worker-deployment-optimized.yaml  # Deployment otimizado
 └── README-WEBHOOK-WORKER-OPTIMIZED.md    # Esta documentação
 ```

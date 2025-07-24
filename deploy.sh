@@ -117,11 +117,7 @@ if [ -f "k8s/secret.yaml" ]; then
     echo -e "${GREEN}✅ Secret aplicado${NC}"
 fi
 
-# Aplicar configmap
-if [ -f "k8s/configmap.yaml" ]; then
-kubectl apply -f k8s/configmap.yaml
-    echo -e "${GREEN}✅ ConfigMap aplicado${NC}"
-fi
+# ConfigMaps removidos - agora usamos imagens customizadas
 
 # Aplicar service
 if [ -f "k8s/service.yaml" ]; then
@@ -140,12 +136,26 @@ fi
 
 echo -e "${GREEN}✅ Deployment aplicado com sucesso${NC}"
 
+# Aplicar frontend deployment
+if [ -f "k8s/frontend-deployment.yaml" ]; then
+    echo -e "${YELLOW}🎨 Aplicando deployment do frontend...${NC}"
+    kubectl apply -f k8s/frontend-deployment.yaml
+    
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}❌ Falha ao aplicar deployment do frontend${NC}"
+        exit 1
+    fi
+    
+    echo -e "${GREEN}✅ Frontend deployment aplicado com sucesso${NC}"
+fi
+
 # Aguardar deployment
-echo -e "${YELLOW}⏳ Aguardando deployment ser processado...${NC}"
-sleep 10
+echo -e "${YELLOW}⏳ Aguardando deployments serem processados...${NC}"
+sleep 15
 
 # Verificar status dos pods
 check_pod_status "whatsapp-webhook" 240
+check_pod_status "whatsapp-frontend" 120
 
 # Verificar se há ingress
 if [ -f "k8s/ingress.yaml" ]; then
