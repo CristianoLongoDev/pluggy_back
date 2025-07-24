@@ -264,6 +264,9 @@ class WhatsAppService:
                     "error": "Token não disponível"
                 }
             
+            # Adicionar prefixo do assistente em todas as mensagens
+            prefixed_message = f"*Plugger Assistente:*\n{message_text}"
+            
             # Configurar headers
             headers = {
                 "Authorization": f"Bearer {access_token}",
@@ -276,11 +279,11 @@ class WhatsAppService:
                 "to": to_phone_number,
                 "type": "text",
                 "text": {
-                    "body": message_text
+                    "body": prefixed_message
                 }
             }
             
-            logger.info(f"Enviando mensagem para {to_phone_number}: {message_text[:50]}...")
+            logger.info(f"Enviando mensagem para {to_phone_number}: {prefixed_message[:50]}...")
             
             # Fazer requisição
             response = requests.post(
@@ -318,8 +321,11 @@ class WhatsAppService:
         """Processa envio de mensagem e salva resultado no banco"""
         logger.info(f"Processando envio para {contact_id}: {message_text[:50]}...")
         
-        # Enviar mensagem
+        # Enviar mensagem (o send_text_message já adiciona o prefixo automaticamente)
         result = self.send_text_message(contact_id, message_text)
+        
+        # Criar mensagem com prefixo para salvar no banco (igual ao que foi enviado)
+        prefixed_message = f"*Plugger Assistente:*\n{message_text}"
         
         if result["success"]:
             # Salvar como message_sent (confirmado) no banco
@@ -330,7 +336,7 @@ class WhatsAppService:
                         "type": "text",
                         "from": "bot",
                         "to": contact_id,
-                        "text": message_text,
+                        "text": prefixed_message,  # Salvar com prefixo
                         "message_id": result.get("message_id"),
                         "status": "sent",
                         "whatsapp_raw": result.get("raw_response")
@@ -354,7 +360,7 @@ class WhatsAppService:
                         "type": "text",
                         "from": "bot",
                         "to": contact_id,
-                        "text": message_text,
+                        "text": prefixed_message,  # Salvar com prefixo mesmo na falha
                         "status": "failed",
                         "error": result.get("error"),
                         "whatsapp_raw": result.get("raw_response")

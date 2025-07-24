@@ -727,24 +727,34 @@ class DatabaseManager:
         result = self._execute_with_fresh_connection(_insert_conversation_message_operation)
         return result is not None
 
-    def insert_conversation_attach(self, conversation_id, file_url, file_type, file_name=None):
+    def insert_conversation_attach(self, conversation_id, file_url, file_type, file_name=None, file_extension=None):
         """Insere um anexo na tabela conversation_attach."""
         if not self.enabled:
             return False
         def _insert_conversation_attach_operation(connection):
             cursor = connection.cursor()
+            
+            # Query dinâmica baseada nos parâmetros fornecidos
+            fields = ["conversation_id", "file_url", "file_type"]
+            values = [conversation_id, file_url, file_type]
+            placeholders = ["%s", "%s", "%s"]
+            
             if file_name is not None:
-                query = """
-                    INSERT INTO conversation_attach (conversation_id, file_url, file_type, file_name)
-                    VALUES (%s, %s, %s, %s)
-                """
-                cursor.execute(query, (conversation_id, file_url, file_type, file_name))
-            else:
-                query = """
-                    INSERT INTO conversation_attach (conversation_id, file_url, file_type)
-                    VALUES (%s, %s, %s)
-                """
-                cursor.execute(query, (conversation_id, file_url, file_type))
+                fields.append("file_name")
+                values.append(file_name)
+                placeholders.append("%s")
+            
+            if file_extension is not None:
+                fields.append("file_extension")
+                values.append(file_extension)
+                placeholders.append("%s")
+            
+            query = f"""
+                INSERT INTO conversation_attach ({', '.join(fields)})
+                VALUES ({', '.join(placeholders)})
+            """
+            
+            cursor.execute(query, values)
             connection.commit()
             cursor.close()
             return True
@@ -767,10 +777,29 @@ class DatabaseManager:
             cursor.execute(query, (conversation_id, limit))
             messages = cursor.fetchall()
             cursor.close()
-            # Retornar em ordem cronológica (mais antiga primeiro)
+            # Retornar em ordem cronológica (mais antiga primeira)
             return list(reversed(messages))
         result = self._execute_with_fresh_connection(_get_conversation_messages_operation)
         return result
+
+    def get_conversation_attachments(self, conversation_id):
+        """Busca todos os anexos de uma conversa."""
+        if not self.enabled:
+            return []
+        def _get_conversation_attachments_operation(connection):
+            cursor = connection.cursor(dictionary=True)
+            query = """
+                SELECT file_url, file_type, file_name, file_extension
+                FROM conversation_attach
+                WHERE conversation_id = %s
+                ORDER BY id ASC
+            """
+            cursor.execute(query, (conversation_id,))
+            attachments = cursor.fetchall()
+            cursor.close()
+            return attachments
+        result = self._execute_with_fresh_connection(_get_conversation_attachments_operation)
+        return result or []
 
     def get_last_user_messages(self, conversation_id, limit=1):
         """Busca as últimas mensagens do usuário (sender='user') de uma conversa."""

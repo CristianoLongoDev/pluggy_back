@@ -246,6 +246,21 @@ class WebhookWorker:
                                 if media_id:
                                     logger.info(f"💾 Obtendo URL de download para media_id={media_id}")
                                     
+                                    # Preparar file_extension baseado no mime_type
+                                    file_extension = None
+                                    if media_type:
+                                        if message_type == 'image':
+                                            # Para imagens, extrair extensão do mime_type (ex: image/jpeg -> .jpeg)
+                                            file_extension = f".{media_type.split('/')[-1]}" if '/' in media_type else None
+                                        elif message_type == 'document':
+                                            # Para documentos, o file_name já tem extensão, mas vamos salvar o mime_type para referência
+                                            file_extension = media_type
+                                        elif message_type == 'audio':
+                                            # Para áudios, extrair extensão do mime_type
+                                            file_extension = f".{media_type.split('/')[-1]}" if '/' in media_type else '.ogg'
+                                    
+                                    logger.info(f"📎 Dados do anexo - Tipo: {message_type}, Mime: {media_type}, Extensão: {file_extension}, Nome: {file_name}")
+                                    
                                     # Obter URL de download real da API do WhatsApp (com timeout robusto)
                                     try:
                                         import signal
@@ -277,7 +292,7 @@ class WebhookWorker:
                                         logger.error(f"❌ Erro ao obter URL de mídia: {url_error}")
                                         download_url = media_id  # Fallback para media_id
                                     
-                                    # Salvar anexo com URL real
+                                    # Salvar anexo com URL real e file_extension
                                     logger.info(f"💾 Salvando anexo na conversation_attach: url={download_url[:50]}..., tipo={message_type}")
                                     for attach_attempt in range(3):
                                         try:
@@ -285,10 +300,11 @@ class WebhookWorker:
                                                 conversation_id=conversation_id,
                                                 file_url=download_url,  # URL real de download
                                                 file_type=message_type,
-                                                file_name=file_name
+                                                file_name=file_name,
+                                                file_extension=file_extension  # Novo campo
                                             )
                                             if success:
-                                                logger.info(f"✅ Anexo salvo na conversation_attach")
+                                                logger.info(f"✅ Anexo salvo na conversation_attach (extensão: {file_extension})")
                                                 break
                                             else:
                                                 logger.error(f"❌ Falha ao salvar anexo (tentativa {attach_attempt + 1})")
@@ -699,55 +715,114 @@ class WebhookWorker:
                     continue
                 
                 if chatgpt_response:
-                    logger.info(f"✅ ChatGPT respondeu: {chatgpt_response[:50]}...")
+                    logger.info(f"✅ ChatGPT respondeu: {str(chatgpt_response)[:50]}...")
                     
-                    # Salvar resposta do ChatGPT na conversa (sender=agent) com retry
-                    conversation_saved = False
-                    for save_attempt in range(3):
-                        try:
-                            conversation = db_manager.get_active_conversation(contact_id)
-                            if conversation:
-                                conversation_id = conversation['id']
-                                success = db_manager.insert_conversation_message(
-                                    conversation_id=conversation_id,
-                                    message_text=chatgpt_response,
-                                    sender='agent',
-                                    message_type='text',
-                                    timestamp=datetime.now()
-                                )
-                                if success:
-                                    conversation_saved = True
+                    # Extrair informações da resposta (compatibilidade com retorno object/string)
+                    if isinstance(chatgpt_response, dict):
+                        response_text = chatgpt_response.get("response", "")
+                        function_executed = chatgpt_response.get("function_executed", False)
+                        logger.info(f"🔍 Resposta do ChatGPT - function_executed: {function_executed}")
+                    else:
+                        # Compatibilidade com retorno string (antigo)
+                        response_text = chatgpt_response
+                        function_executed = False
+                        logger.info(f"🔍 Resposta do ChatGPT - formato string (function_executed: False)")
+                    
+                    # Se uma function foi executada, não precisamos enviar mensagem duplicada
+                    if function_executed:
+                        logger.info(f"⚠️ Function foi executada - mensagem já enviada pela function, não enviando duplicata")
+                        # Apenas salvar na conversa se não foi salva pela function
+                        if response_text and not any(keyword in response_text.lower() for keyword in ['ticket', 'incluído', 'atendimento finalizado']):
+                            # Salvar resposta na conversa apenas se não for mensagem de ticket (já salva pela function)
+                            conversation_saved = False
+                            for save_attempt in range(3):
+                                try:
+                                    conversation = db_manager.get_active_conversation(contact_id)
+                                    if conversation:
+                                        conversation_id = conversation['id']
+                                        
+                                        # Adicionar prefixo na resposta do ChatGPT para salvar na conversa
+                                        chatgpt_response_with_prefix = f"*Plugger Assistente:*\n{response_text}"
+                                        
+                                        success = db_manager.insert_conversation_message(
+                                            conversation_id=conversation_id,
+                                            message_text=chatgpt_response_with_prefix,
+                                            sender='agent',
+                                            message_type='text',
+                                            timestamp=datetime.now()
+                                        )
+                                        if success:
+                                            conversation_saved = True
+                                            break
+                                        else:
+                                            logger.warning(f"Tentativa {save_attempt + 1} de salvar conversa falhou")
+                                    else:
+                                        logger.warning(f"Não encontrou conversa ativa para {contact_id} ao salvar resposta do ChatGPT.")
+                                        conversation_saved = True  # Não bloquear por isso
+                                        break
+                                except Exception as save_error:
+                                    logger.warning(f"Erro ao salvar conversa (tentativa {save_attempt + 1}): {save_error}")
+                                    time.sleep(1)
+                            
+                            if not conversation_saved:
+                                logger.error(f"❌ Falha ao salvar conversa após 3 tentativas para {contact_id}")
+                        
+                        # Function já tratou tudo - finalizar aqui
+                        return
+                    
+                    # Fluxo normal - function não foi executada, enviar mensagem
+                    if response_text:
+                        # Salvar resposta do ChatGPT na conversa (sender=agent) com retry
+                        conversation_saved = False
+                        for save_attempt in range(3):
+                            try:
+                                conversation = db_manager.get_active_conversation(contact_id)
+                                if conversation:
+                                    conversation_id = conversation['id']
+                                    
+                                    # Adicionar prefixo na resposta do ChatGPT para salvar na conversa
+                                    chatgpt_response_with_prefix = f"*Plugger Assistente:*\n{response_text}"
+                                    
+                                    success = db_manager.insert_conversation_message(
+                                        conversation_id=conversation_id,
+                                        message_text=chatgpt_response_with_prefix,
+                                        sender='agent',
+                                        message_type='text',
+                                        timestamp=datetime.now()
+                                    )
+                                    if success:
+                                        conversation_saved = True
+                                        break
+                                    else:
+                                        logger.warning(f"Tentativa {save_attempt + 1} de salvar conversa falhou")
+                                else:
+                                    logger.warning(f"Não encontrou conversa ativa para {contact_id} ao salvar resposta do ChatGPT.")
+                                    conversation_saved = True  # Não bloquear por isso
+                                    break
+                            except Exception as save_error:
+                                logger.warning(f"Erro ao salvar conversa (tentativa {save_attempt + 1}): {save_error}")
+                                time.sleep(1)
+                        
+                        if not conversation_saved:
+                            logger.error(f"❌ Falha ao salvar conversa após 3 tentativas para {contact_id}")
+                        
+                        # Enviar resposta via WhatsApp com retry
+                        send_success = False
+                        for send_attempt in range(3):
+                            try:
+                                sent = whatsapp_service.process_outgoing_message(contact_id, response_text)
+                                if sent:
+                                    logger.info(f"📤 Resposta enviada com sucesso para {contact_id}")
+                                    send_success = True
                                     break
                                 else:
-                                    logger.warning(f"Tentativa {save_attempt + 1} de salvar conversa falhou")
-                            else:
-                                logger.warning(f"Não encontrou conversa ativa para {contact_id} ao salvar resposta do ChatGPT.")
-                                conversation_saved = True  # Não bloquear por isso
-                                break
-                        except Exception as save_error:
-                            logger.warning(f"Erro ao salvar conversa (tentativa {save_attempt + 1}): {save_error}")
-                            time.sleep(1)
-                    
-                    if not conversation_saved:
-                        logger.error(f"❌ Falha ao salvar conversa após 3 tentativas para {contact_id}")
-                    
-                    # Enviar resposta via WhatsApp com retry
-                    send_success = False
-                    for send_attempt in range(3):
-                        try:
-                            sent = whatsapp_service.process_outgoing_message(contact_id, chatgpt_response)
-                            if sent:
-                                logger.info(f"📤 Resposta enviada com sucesso para {contact_id}")
-                                send_success = True
-                                break
-                            else:
-                                logger.warning(f"⚠️ Tentativa {send_attempt + 1} de envio falhou para {contact_id}")
-                        except Exception as send_error:
-                            logger.warning(f"Erro no envio (tentativa {send_attempt + 1}): {send_error}")
-                            time.sleep(1)
-                    
-                    if not send_success:
-                        logger.error(f"❌ Falha ao enviar mensagem após 3 tentativas para {contact_id}")
+                                    logger.warning(f"⚠️ Tentativa {send_attempt + 1} de envio falhou para {contact_id}")
+                            except Exception as send_error:
+                                logger.warning(f"Erro no envio (tentativa {send_attempt + 1}): {send_error}")
+                                time.sleep(1)
+                        
+                        if not send_success:
+                            logger.error(f"❌ Falha ao enviar mensagem após 3 tentativas para {contact_id}")
                     
                     # Sucesso - sair do loop de retry
                     return
