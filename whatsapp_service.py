@@ -12,10 +12,51 @@ class WhatsAppService:
     def __init__(self):
         self.app_id = "983764203018472"
         self.app_secret = "ae9b212c99dcb6a255e6dad2acc6b484"
-        self.phone_number_id = "421769451025047"
         self.api_version = "v21.0"
         self.base_url = f"https://graph.facebook.com/{self.api_version}"
-        self.messages_url = f"{self.base_url}/{self.phone_number_id}/messages"
+        
+        # Campos dinâmicos - carregados do banco
+        self._phone_config = None
+        self._messages_url = None
+    
+    def get_phone_config(self):
+        """Carrega configuração do telefone do banco (com cache)"""
+        if self._phone_config is None:
+            self._phone_config = db_manager.get_whatsapp_phone_config()
+            
+            if not self._phone_config:
+                # Fallback para valores padrão se não encontrar no banco
+                logger.warning("Configuração do telefone não encontrada no banco, usando valores padrão")
+                self._phone_config = {
+                    "phone_number_id": "421769451025047",
+                    "display_phone_number": "555437710014"
+                }
+        
+        return self._phone_config
+    
+    def get_phone_number_id(self):
+        """Retorna phone_number_id do banco"""
+        config = self.get_phone_config()
+        return config.get('phone_number_id', "421769451025047")
+    
+    def get_display_phone_number(self):
+        """Retorna display_phone_number do banco"""
+        config = self.get_phone_config()
+        return config.get('display_phone_number', "555437710014")
+    
+    def get_messages_url(self):
+        """Retorna URL de mensagens usando phone_number_id do banco"""
+        if self._messages_url is None:
+            phone_number_id = self.get_phone_number_id()
+            self._messages_url = f"{self.base_url}/{phone_number_id}/messages"
+        
+        return self._messages_url
+    
+    def refresh_phone_config(self):
+        """Força recarregamento da configuração do telefone"""
+        self._phone_config = None
+        self._messages_url = None
+        logger.info("Cache da configuração do telefone limpo")
         
     def get_oauth_url(self, redirect_uri):
         """Gera URL para autorização OAuth do WhatsApp"""
@@ -264,8 +305,8 @@ class WhatsAppService:
                     "error": "Token não disponível"
                 }
             
-            # Adicionar prefixo do assistente em todas as mensagens
-            prefixed_message = f"*Plugger Assistente:*\n{message_text}"
+            # Usar a mensagem diretamente (prefixo já adicionado no webhook_worker se necessário)
+            prefixed_message = message_text
             
             # Configurar headers
             headers = {
@@ -287,7 +328,7 @@ class WhatsAppService:
             
             # Fazer requisição
             response = requests.post(
-                self.messages_url,
+                self.get_messages_url(),
                 headers=headers,
                 json=payload,
                 timeout=30

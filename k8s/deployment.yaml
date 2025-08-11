@@ -18,6 +18,7 @@ spec:
       containers:
       - name: whatsapp-webhook
         image: cristianopluggerbi/whatsapp-webhook:latest
+        imagePullPolicy: Always
         ports:
         - containerPort: 5000
         env:
@@ -58,16 +59,26 @@ spec:
           value: "admin"
         - name: RABBITMQ_PASSWORD
           value: "rabbitmq123"
+        - name: SUPABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: whatsapp-webhook-secret
+              key: SUPABASE_URL
+        - name: SUPABASE_ANON_KEY
+          valueFrom:
+            secretKeyRef:
+              name: whatsapp-webhook-secret
+              key: SUPABASE_ANON_KEY
         workingDir: /app
         command: ["python"]
         args: ["app.py"]
         resources:
           requests:
-            memory: "32Mi"
-            cpu: "20m"
+            memory: "128Mi"
+            cpu: "50m"
           limits:
-            memory: "64Mi"
-            cpu: "100m"
+            memory: "256Mi"
+            cpu: "200m"
         livenessProbe:
           httpGet:
             path: /health

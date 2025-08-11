@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import signal
+import uuid
 import sys
 import time
 from datetime import datetime, timezone
@@ -94,13 +95,13 @@ class WebhookWorker:
                         file_name = None
                         
                         if event_type == 'message_received':
-                            contact_id = event_data.get('from')
+                            from_phone_number = event_data.get('from')
                             sender = 'user'
                             message_type = event_data.get('type', 'unknown')
                             
                             # Filtrar reações - não criar conversa para reações
                             if message_type == 'reaction':
-                                logger.info(f"🔇 Mensagem do tipo 'reaction' de {contact_id} ignorada - não criando conversa")
+                                logger.info(f"🔇 Mensagem do tipo 'reaction' de {from_phone_number} ignorada - não criando conversa")
                                 return True  # Retorna sucesso mas sem processar
                             
                             if message_type == 'text':
@@ -135,6 +136,42 @@ class WebhookWorker:
                             if message_type == 'text':
                                 message_text = event_data.get('text')
                             msg_timestamp = event_data.get('timestamp')
+                        
+                        # Buscar contato UUID pelo número de telefone (só para message_received)
+                        if event_type == 'message_received' and from_phone_number:
+                            logger.info(f"📞 Buscando UUID do contato para número: {from_phone_number}")
+                            try:
+                                def _get_contact_by_phone_operation(connection):
+                                    cursor = connection.cursor(dictionary=True)
+                                    query = """
+                                        SELECT id, name, account_id, whatsapp_phone_number 
+                                        FROM contacts 
+                                        WHERE whatsapp_phone_number = %s
+                                        LIMIT 1
+                                    """
+                                    cursor.execute(query, (from_phone_number,))
+                                    result = cursor.fetchone()
+                                    cursor.close()
+                                    return result
+                                
+                                contact = db_manager._execute_with_fresh_connection(_get_contact_by_phone_operation)
+                                if contact:
+                                    contact_id = contact['id']
+                                    logger.info(f"✅ Contato encontrado: {contact_id} para {from_phone_number}")
+                                else:
+                                    logger.warning(f"❌ Contato não encontrado para {from_phone_number}")
+                                    logger.info("💡 Recomendação: Processar via webhook_received completo primeiro")
+                                    return True
+                            except Exception as contact_error:
+                                logger.error(f"❌ Erro ao buscar contato: {contact_error}")
+                                return True
+                        elif event_type == 'message_sent':
+                            # Para message_sent, contact_id já foi definido na linha 133
+                            pass
+                        
+                        if not contact_id:
+                            logger.warning(f"⚠️ contact_id inválido, não processando mensagem")
+                            return True
                         
                         logger.info(f"📝 Extraído: contact_id={contact_id}, sender={sender}, message_text='{message_text[:50] if message_text else None}...'")
                         
@@ -434,15 +471,950 @@ class WebhookWorker:
                 for change in changes:
                     value = change.get('value', {})
                     
-                    # Processar mensagens
+                    # TAREFA 1: Processar apenas webhooks com messages, ignorar statuses
                     if 'messages' in value:
-                        for message in value['messages']:
-                            logger.info(f"📱 Mensagem detectada de: {message.get('from')}")
+                        logger.info(f"📱 Processando webhook com {len(value['messages'])} mensagens")
+                        self._process_whatsapp_messages(value, entry)
+                    elif 'statuses' in value:
+                        logger.info(f"📊 Ignorando webhook com statuses: {len(value['statuses'])} status(es)")
+                    else:
+                        logger.warning(f"⚠️ Webhook sem messages nem statuses: {list(value.keys())}")
+    
+    def _process_whatsapp_messages(self, value, entry):
+        """Processa mensagens do webhook WhatsApp"""
+        try:
+            # Extrair dados do webhook
+            metadata = value.get('metadata', {})
+            display_phone_number = metadata.get('display_phone_number')
+            
+            if not display_phone_number:
+                logger.error("❌ display_phone_number não encontrado no webhook")
+                return
+            
+            logger.info(f"📞 Display phone number: {display_phone_number}")
+            
+            # TAREFA 2: Buscar canal pelo display_phone_number
+            channel = self._get_channel_by_phone(display_phone_number)
+            if not channel:
+                logger.error(f"❌ Canal não encontrado para o número: {display_phone_number}")
+                return
+            
+            logger.info(f"📋 Canal encontrado: {channel['id']} (Account: {channel['account_id']}, Bot: {channel['bot_id']})")
+            
+            # Buscar bot para obter system_prompt
+            bot = None
+            if channel.get('bot_id'):
+                bot = self._get_bot_by_id(channel['bot_id'])
+                if bot:
+                    logger.info(f"🤖 Bot encontrado: {bot['name']}, system_prompt presente: {bool(bot.get('system_prompt'))}")
+                else:
+                    logger.warning(f"🚫 Bot não encontrado para bot_id: {channel['bot_id']}")
+            
+            # Processar cada mensagem
+            for message in value.get('messages', []):
+                self._process_single_message(message, value, channel, bot)
+                
+        except Exception as e:
+            logger.error(f"❌ Erro ao processar mensagens do WhatsApp: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+    
+    def _get_channel_by_phone(self, display_phone_number):
+        """Busca canal pelo display_phone_number"""
+        if not db_manager.enabled:
+            return None
+        
+        def _get_channel_operation(connection):
+            cursor = connection.cursor(dictionary=True)
+            query = """
+                SELECT id, account_id, bot_id, name, phone_number
+                FROM channels 
+                WHERE phone_number = %s AND active = 1
+                LIMIT 1
+            """
+            cursor.execute(query, (display_phone_number,))
+            result = cursor.fetchone()
+            cursor.close()
+            return result
+        
+        return db_manager._execute_with_fresh_connection(_get_channel_operation)
+    
+    def _get_bot_by_id(self, bot_id):
+        """Busca bot pelo ID"""
+        if not db_manager.enabled:
+            return None
+        
+        def _get_bot_operation(connection):
+            cursor = connection.cursor(dictionary=True)
+            query = """
+                SELECT id, account_id, name, system_prompt
+                FROM bots 
+                WHERE id = %s
+                LIMIT 1
+            """
+            cursor.execute(query, (bot_id,))
+            result = cursor.fetchone()
+            cursor.close()
+            return result
+        
+        return db_manager._execute_with_fresh_connection(_get_bot_operation)
+    
+    def _process_single_message(self, message, value, channel, bot=None):
+        """Processa uma mensagem individual"""
+        try:
+            from_number = message.get('from')
+            message_text = self._extract_message_text(message)
+            
+            if not from_number:
+                logger.error("❌ Número do remetente não encontrado na mensagem")
+                return
+            
+            logger.info(f"💬 Processando mensagem de {from_number}: {message_text[:50]}...")
+            
+            # TAREFA 2: Buscar/criar contato
+            contact = self._get_or_create_contact(from_number, value, channel['account_id'])
+            if not contact:
+                logger.error(f"❌ Falha ao obter/criar contato para {from_number}")
+                return
+            
+            # TAREFA 3: Processar conversa com novos parâmetros
+            self._process_conversation_with_channel(contact, channel, message, message_text, bot)
+            
+        except Exception as e:
+            logger.error(f"❌ Erro ao processar mensagem individual: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+    
+    def _extract_message_text(self, message):
+        """Extrai o texto da mensagem baseado no tipo"""
+        message_type = message.get('type', 'unknown')
+        
+        if message_type == 'text':
+            return message.get('text', {}).get('body', '')
+        elif message_type == 'image':
+            return '[Imagem enviada]'
+        elif message_type == 'document':
+            return '[Documento enviado]'
+        elif message_type == 'audio':
+            return '[Áudio enviado]'
+        elif message_type == 'video':
+            return '[Vídeo enviado]'
+        else:
+            return f'[Mensagem do tipo {message_type}]'
+    
+    def _get_or_create_contact(self, from_number, value, account_id):
+        """Busca ou cria contato"""
+        if not db_manager.enabled:
+            return None
+        
+        # Primeiro, buscar se já existe
+        def _get_contact_operation(connection):
+            cursor = connection.cursor(dictionary=True)
+            query = """
+                SELECT id, name, email, whatsapp_phone_number, account_id
+                FROM contacts 
+                WHERE whatsapp_phone_number = %s AND account_id = %s
+                LIMIT 1
+            """
+            cursor.execute(query, (from_number, account_id))
+            result = cursor.fetchone()
+            cursor.close()
+            return result
+        
+        contact = db_manager._execute_with_fresh_connection(_get_contact_operation)
+        
+        if contact:
+            logger.info(f"✅ Contato existente encontrado: {contact['id']}")
+            return contact
+        
+        # Criar novo contato
+        contact_name = self._extract_contact_name(value)
+        contact_id = str(uuid.uuid4())
+        
+        def _create_contact_operation(connection):
+            cursor = connection.cursor()
+            query = """
+                INSERT INTO contacts (id, name, account_id, whatsapp_phone_number)
+                VALUES (%s, %s, %s, %s)
+            """
+            cursor.execute(query, (contact_id, contact_name, account_id, from_number))
+            connection.commit()
+            cursor.close()
+            return True
+        
+        success = db_manager._execute_with_fresh_connection(_create_contact_operation)
+        
+        if success:
+            logger.info(f"✅ Novo contato criado: {contact_id} - {contact_name}")
+            return {
+                'id': contact_id,
+                'name': contact_name,
+                'email': None,
+                'whatsapp_phone_number': from_number,
+                'account_id': account_id
+            }
+        else:
+            logger.error(f"❌ Falha ao criar contato para {from_number}")
+            return None
+    
+    def _extract_contact_name(self, value):
+        """Extrai o nome do contato do webhook"""
+        contacts = value.get('contacts', [])
+        if contacts and len(contacts) > 0:
+            profile = contacts[0].get('profile', {})
+            return profile.get('name', 'Usuário sem nome')
+        return 'Usuário sem nome'
+    
+    def _process_conversation_with_channel(self, contact, channel, message, message_text, bot=None):
+        """Processa conversa com novos parâmetros (channel_id e status_attendance)"""
+        try:
+            # Buscar conversa ativa
+            conversation = db_manager.get_active_conversation(contact['id'])
+            
+            if not conversation:
+                # Criar nova conversa com channel_id e status_attendance
+                conversation_id = self._create_conversation_with_channel(contact['id'], channel['id'])
+                if not conversation_id:
+                    logger.error(f"❌ Falha ao criar conversa para contato {contact['id']}")
+                    return
+            else:
+                conversation_id = conversation['id']
+                logger.info(f"💬 Usando conversa existente: {conversation_id}")
+            
+            # Salvar mensagem na conversa
+            success = db_manager.insert_conversation_message(
+                conversation_id=conversation_id,
+                message_text=message_text,
+                sender='user',
+                message_type=message.get('type', 'text'),
+                timestamp=datetime.now()
+            )
+            
+            if success:
+                logger.info(f"✅ Mensagem salva na conversa {conversation_id}")
+                
+                # TAREFA 3: Processar ChatGPT com system_prompt do bot
+                self._process_chatgpt_with_bot_prompt(contact, channel, conversation_id, message_text, bot)
+            else:
+                logger.error(f"❌ Falha ao salvar mensagem na conversa")
+                
+        except Exception as e:
+            logger.error(f"❌ Erro ao processar conversa: {e}")
+    
+    def _create_conversation_with_channel(self, contact_id, channel_id):
+        """Cria nova conversa com channel_id, status_attendance='bot' e system_prompt"""
+        if not db_manager.enabled:
+            return None
+        
+        def _create_conversation_operation(connection):
+            cursor = connection.cursor(dictionary=True)
+            
+            # Buscar bot_id e system_prompt em uma única query com JOIN
+            channel_bot_query = """
+                SELECT bots.system_prompt, channels.bot_id 
+                FROM channels 
+                JOIN bots ON (channels.bot_id = bots.id)
+                WHERE channels.id = %s AND channels.active = 1
+                LIMIT 1
+            """
+            cursor.execute(channel_bot_query, (channel_id,))
+            bot_result = cursor.fetchone()
+            
+            system_prompt = None
+            if bot_result and bot_result['system_prompt']:
+                bot_id = bot_result['bot_id']
+                logger.info(f"Bot ID encontrado: {bot_id} (tipo: {type(bot_id)}) para channel {channel_id}")
+                
+                # Buscar funções do bot
+                logger.info(f"🚀 Iniciando busca de funções para bot_id: {bot_id}")
+                bot_functions = self._get_bot_functions_for_conversation(bot_id, cursor)
+                logger.info(f"🚀 Busca de funções finalizada. Encontradas {len(bot_functions)} funções")
+                
+                # Formatar system_prompt no formato JSON do ChatGPT com tools
+                import json
+                conversation_data = {
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": bot_result['system_prompt']
+                        }
+                    ],
+                    "tools": bot_functions,
+                    "tool_choice": "auto"
+                }
+                system_prompt = json.dumps(conversation_data, ensure_ascii=False)
+                logger.info(f"System prompt + {len(bot_functions)} funções formatados para ChatGPT - bot {bot_id}")
+            else:
+                logger.warning(f"Bot ou system_prompt não encontrado para channel {channel_id}")
+            
+            # Criar conversa com system_prompt formatado
+            insert_query = """
+                INSERT INTO conversation (contact_id, channel_id, status, status_attendance, system_prompt, started_at)
+                VALUES (%s, %s, 'active', 'bot', %s, NOW())
+            """
+            cursor.execute(insert_query, (contact_id, channel_id, system_prompt))
+            conversation_id = cursor.lastrowid
+            connection.commit()
+            cursor.close()
+            logger.info(f"Conversa criada: {conversation_id} com system_prompt gravado")
+            return conversation_id
+        
+        return db_manager._execute_with_fresh_connection(_create_conversation_operation)
+    
+    def _get_bot_functions_for_conversation(self, bot_id, cursor):
+        """Busca e formata funções do bot para usar no ChatGPT"""
+        try:
+            logger.info(f"🔍 Buscando funções para bot_id: {bot_id}")
                     
-                    # Processar status
-                    if 'statuses' in value:
-                        for status in value['statuses']:
-                            logger.info(f"📊 Status detectado: {status.get('status')}")
+            # Buscar funções do bot onde prompt_id IS NULL  
+            functions_query = """
+                SELECT bpf.function_id
+                FROM bots_prompts_functions bpf
+                WHERE bpf.bot_id = %s AND bpf.prompt_id IS NULL
+            """
+            cursor.execute(functions_query, (bot_id,))
+            function_ids = cursor.fetchall()
+            
+            logger.info(f"🔍 Encontradas {len(function_ids)} funções para bot {bot_id} com prompt_id IS NULL")
+            if function_ids:
+                logger.info(f"🔍 IDs das funções encontradas: {[f['function_id'] for f in function_ids]}")
+            
+            if not function_ids:
+                logger.warning(f"❌ Nenhuma função encontrada para bot {bot_id} com prompt_id IS NULL")
+                
+                # Fallback: tentar buscar todas as funções do bot (ignorando prompt_id)
+                fallback_query = """
+                    SELECT DISTINCT bpf.function_id
+                    FROM bots_prompts_functions bpf
+                    WHERE bpf.bot_id = %s
+                """
+                cursor.execute(fallback_query, (bot_id,))
+                fallback_function_ids = cursor.fetchall()
+                
+                if fallback_function_ids:
+                    logger.info(f"🔧 FALLBACK: Encontradas {len(fallback_function_ids)} funções totais para bot {bot_id}")
+                    logger.info(f"🔧 FALLBACK: IDs das funções: {[f['function_id'] for f in fallback_function_ids]}")
+                    function_ids = fallback_function_ids
+                else:
+                    logger.error(f"❌ Nenhuma função encontrada para bot {bot_id} em qualquer cenário")
+                    return []
+                                     
+            bot_functions = []
+            for func_row in function_ids:
+                function_id = func_row['function_id']
+                logger.info(f"🔧 Processando função: {function_id}")
+                
+                # Primeiro buscar dados da função
+                function_query = """
+                    SELECT function_id, description
+                    FROM bots_functions
+                    WHERE function_id = %s AND bot_id = %s
+                """
+                try:
+                    logger.info(f"🔧 Buscando dados da função {function_id} para bot {bot_id}")
+                    cursor.execute(function_query, (function_id, bot_id))
+                    function_data = cursor.fetchone()
+                    
+                    if not function_data:
+                        logger.warning(f"❌ Função {function_id} não encontrada para bot {bot_id}")
+                        continue
+                        
+                    function_description = function_data['description']
+                    logger.info(f"✅ Função {function_id} encontrada: {function_description}")
+                    
+                    # Agora buscar parâmetros da função filtrados por bot_id
+                    params_query = """
+                        SELECT parameter_id, description, permited_values, default_value
+                        FROM bots_functions_parameters
+                        WHERE function_id = %s AND bot_id = %s
+                    """
+                    logger.info(f"🔧 Buscando parâmetros para função {function_id} e bot {bot_id}")
+                    cursor.execute(params_query, (function_id, bot_id))
+                    parameters_data = cursor.fetchall()
+                    
+                    logger.info(f"🔧 Encontrados {len(parameters_data)} parâmetros para função {function_id}")
+                    
+                    # Extrair parâmetros
+                    parameters = []
+                    for param_row in parameters_data:
+                        parameters.append({
+                            'parameter_id': param_row['parameter_id'],
+                            'description': param_row['description'],
+                            'permitted_values': param_row['permited_values'],
+                            'default_value': param_row['default_value']
+                        })
+                    
+                    logger.info(f"✅ Função {function_id} processada com {len(parameters)} parâmetros")
+                    
+                except Exception as query_error:
+                    logger.error(f"❌ Erro ao buscar função {function_id}: {query_error}")
+                    logger.error(f"❌ Detalhes do erro: {str(query_error)}")
+                    continue
+                
+                # Montar estrutura da função no formato tools do ChatGPT
+                function_obj = {
+                    "type": "function",
+                    "function": {
+                        "name": function_id,
+                        "description": function_description,
+                        "parameters": {
+                            "type": "object",
+                            "required": [],
+                            "properties": {}
+                        }
+                    }
+                }
+                
+                # Processar parâmetros
+                for param in parameters:
+                    param_id = param['parameter_id']
+                    param_desc = param['description']
+                    permitted_values = param.get('permitted_values')
+                    default_value = param.get('default_value')
+                    
+                    # Adicionar às propriedades obrigatórias
+                    function_obj["function"]["parameters"]["required"].append(param_id)
+                    
+                    # Montar propriedade do parâmetro
+                    param_property = {
+                        "type": "string",
+                        "description": param_desc
+                    }
+                    
+                    # Adicionar enum se tiver valores permitidos
+                    if permitted_values:
+                        param_property["enum"] = permitted_values.split(',') if isinstance(permitted_values, str) else permitted_values
+                    
+                    # Adicionar valor padrão se tiver
+                    if default_value:
+                        param_property["default"] = default_value
+                    
+                    function_obj["function"]["parameters"]["properties"][param_id] = param_property
+                
+                bot_functions.append(function_obj)
+                logger.info(f"✅ Função {function_id} adicionada com {len(parameters)} parâmetros")
+                
+                # Log da estrutura da função (com import local)
+                import json
+                logger.info(f"🔧 Estrutura da função: {json.dumps(function_obj, ensure_ascii=False)[:200]}...")
+            
+            logger.info(f"🎯 Total de {len(bot_functions)} funções formatadas para bot {bot_id}")
+            return bot_functions
+            
+        except Exception as e:
+            logger.error(f"❌ Erro ao buscar funções do bot {bot_id}: {e}")
+            import traceback
+            logger.error(f"❌ Traceback: {traceback.format_exc()}")
+            return []
+    
+    def _get_conversation_system_prompt(self, conversation_id):
+        """Busca system_prompt da conversa"""
+        if not db_manager.enabled:
+            return None
+        
+        def _get_system_prompt_operation(connection):
+            cursor = connection.cursor(dictionary=True)
+            query = """
+                SELECT system_prompt FROM conversation 
+                WHERE id = %s
+                LIMIT 1
+            """
+            cursor.execute(query, (conversation_id,))
+            result = cursor.fetchone()
+            cursor.close()
+            return result['system_prompt'] if result else None
+        
+        return db_manager._execute_with_fresh_connection(_get_system_prompt_operation)
+    
+    def _get_conversation_by_id(self, conversation_id):
+        """Busca dados de uma conversa pelo ID"""
+        if not db_manager.enabled:
+            return None
+        
+        def _get_conversation_operation(connection):
+            cursor = connection.cursor(dictionary=True)
+            query = """
+                SELECT id, contact_id, channel_id, status, status_attendance, system_prompt, started_at
+                FROM conversation 
+                WHERE id = %s
+                LIMIT 1
+            """
+            cursor.execute(query, (conversation_id,))
+            result = cursor.fetchone()
+            cursor.close()
+            return result
+        
+        return db_manager._execute_with_fresh_connection(_get_conversation_operation)
+    
+    def _process_chatgpt_with_bot_prompt(self, contact, channel, conversation_id, message_text, bot=None):
+        """Processa ChatGPT usando system_prompt da conversa"""
+        try:
+            logger.info(f"🤖 Iniciando processamento ChatGPT para conversa {conversation_id}")
+            
+            # Buscar system_prompt da conversa (já formatado para ChatGPT)
+            system_prompt_json = self._get_conversation_system_prompt(conversation_id)
+            if not system_prompt_json:
+                logger.error(f"❌ System prompt não encontrado na conversa {conversation_id}")
+                return
+            
+            # System prompt e funções já estão formatados, usar diretamente
+            import json
+            try:
+                conversation_data = json.loads(system_prompt_json)
+                
+                # Extrair system_prompt e tools (novo formato ChatGPT)
+                if 'messages' in conversation_data and 'tools' in conversation_data:
+                    # Novo formato ChatGPT com messages + tools
+                    system_prompt_obj = conversation_data['messages'][0]  # Primeira mensagem é o system
+                    bot_functions = conversation_data['tools']
+                    system_prompt_content = system_prompt_obj.get('content', '')
+                    logger.info(f"🎯 System prompt + {len(bot_functions)} tools carregados da conversa (novo formato)")
+                elif 'system_prompt' in conversation_data and 'functions' in conversation_data:
+                    # Formato intermediário com system_prompt + functions
+                    system_prompt_obj = conversation_data['system_prompt']
+                    bot_functions = conversation_data['functions']
+                    system_prompt_content = system_prompt_obj.get('content', '')
+                    logger.info(f"🎯 System prompt + {len(bot_functions)} funções carregados da conversa (formato intermediário)")
+                else:
+                    # Formato antigo (só system_prompt)
+                    system_prompt_obj = conversation_data
+                    bot_functions = []
+                    system_prompt_content = conversation_data.get('content', '')
+                    logger.info(f"🎯 System prompt carregado da conversa (formato antigo)")
+                
+                # TAREFA 4: Aplicar prompts dinâmicos baseados em eventos
+                dynamic_prompts, prompt_functions = self._get_dynamic_prompts_and_functions(contact, channel['bot_id'])
+                if dynamic_prompts:
+                    # Atualizar o conteúdo com prompts dinâmicos
+                    system_prompt_content = f"{system_prompt_content}\n\n{dynamic_prompts}"
+                    system_prompt_obj['content'] = system_prompt_content
+                    logger.info(f"📝 Prompts dinâmicos aplicados: {len(dynamic_prompts)} caracteres")
+                
+                # Combinar funções da conversa + funções dos prompts dinâmicos
+                all_functions = bot_functions + prompt_functions
+                
+                # Reformatar dados para envio
+                final_system_prompt_content = system_prompt_content
+                
+            except json.JSONDecodeError:
+                # Fallback para formato muito antigo (texto puro)
+                system_prompt_content = system_prompt_json
+                logger.warning(f"⚠️ System prompt em formato muito antigo, convertendo")
+                
+                # TAREFA 4: Aplicar prompts dinâmicos baseados em eventos  
+                dynamic_prompts, prompt_functions = self._get_dynamic_prompts_and_functions(contact, channel['bot_id'])
+                if dynamic_prompts:
+                    system_prompt_content = f"{system_prompt_content}\n\n{dynamic_prompts}"
+                    logger.info(f"📝 Prompts dinâmicos aplicados: {len(dynamic_prompts)} caracteres")
+                
+                # Converter para formato JSON
+                system_prompt_obj = {
+                    "role": "system", 
+                    "content": system_prompt_content
+                }
+                all_functions = prompt_functions
+                final_system_prompt_content = system_prompt_content
+            
+            logger.info(f"🔧 Total de {len(all_functions)} funções preparadas para ChatGPT")
+            
+            # Continuar com processamento ChatGPT usando delay worker
+            current_time = time.time()
+            delay_task = {
+                'task_type': 'chatgpt_delay_check',
+                'contact_id': contact['id'],
+                'conversation_id': conversation_id,
+                'created_at': current_time,
+                'task_created_timestamp': current_time,
+                'channel_id': channel['id'],
+                'bot_id': channel['bot_id'],
+                'system_prompt_json': json.dumps(system_prompt_obj, ensure_ascii=False),
+                'chatgpt_functions': all_functions
+            }
+            
+            from rabbitmq_manager import rabbitmq_manager
+            success = rabbitmq_manager.publish_with_delay(delay_task, delay_seconds=10)
+            if success:
+                logger.info(f"⏰ Tarefa ChatGPT criada para conversa {conversation_id}")
+            else:
+                logger.error(f"❌ Falha ao enviar tarefa ChatGPT")
+                
+        except Exception as e:
+            logger.error(f"❌ Erro ao processar ChatGPT: {e}")
+    
+    def _process_chatgpt_with_conversation_config(self, contact_id, conversation_id):
+        """Processa ChatGPT usando system_prompt salvo na conversa + contexto dinâmico"""
+        try:
+            logger.info(f"🤖 Processando ChatGPT com conversation config para conversa {conversation_id}")
+            
+            # Buscar dados da conversa
+            conversation = self._get_conversation_by_id(conversation_id)
+            if not conversation:
+                logger.error(f"❌ Conversa {conversation_id} não encontrada")
+                return
+            
+            # Buscar system_prompt da conversa (já formatado para ChatGPT com functions)
+            system_prompt_json = self._get_conversation_system_prompt(conversation_id)
+            if not system_prompt_json:
+                logger.error(f"❌ System prompt não encontrado na conversa {conversation_id}")
+                return
+            
+            # Buscar dados do contact e channel
+            contact = db_manager.get_contact(contact_id)
+            if not contact:
+                logger.error(f"❌ Contato {contact_id} não encontrado")
+                return
+                
+            channel = db_manager.get_channel(conversation['channel_id'])
+            if not channel:
+                logger.error(f"❌ Canal {conversation['channel_id']} não encontrado")
+                return
+            
+            # Processar o JSON do system_prompt
+            try:
+                import json
+                conversation_data = json.loads(system_prompt_json)
+                
+                # Extrair system_prompt e tools (novo formato ChatGPT)
+                if 'messages' in conversation_data and 'tools' in conversation_data:
+                    # Novo formato ChatGPT com messages + tools
+                    system_prompt_obj = conversation_data['messages'][0]  # Primeira mensagem é o system
+                    bot_functions = conversation_data['tools']
+                    system_prompt_content = system_prompt_obj.get('content', '')
+                    logger.info(f"🎯 System prompt + {len(bot_functions)} tools carregados da conversa (novo formato)")
+                elif 'system_prompt' in conversation_data and 'functions' in conversation_data:
+                    # Formato intermediário com system_prompt + functions
+                    system_prompt_obj = conversation_data['system_prompt']
+                    bot_functions = conversation_data['functions']
+                    system_prompt_content = system_prompt_obj.get('content', '')
+                    logger.info(f"🎯 System prompt + {len(bot_functions)} funções carregados da conversa (formato intermediário)")
+                else:
+                    # Formato antigo (só system_prompt)
+                    system_prompt_obj = conversation_data
+                    bot_functions = []
+                    system_prompt_content = conversation_data.get('content', '')
+                    logger.info(f"🎯 System prompt carregado da conversa (formato antigo)")
+                
+                # Aplicar prompts dinâmicos baseados em eventos
+                dynamic_prompts, prompt_functions = self._get_dynamic_prompts_and_functions(contact, channel['bot_id'])
+                if dynamic_prompts:
+                    # Atualizar o conteúdo com prompts dinâmicos
+                    system_prompt_content = f"{system_prompt_content}\n\n{dynamic_prompts}"
+                    system_prompt_obj['content'] = system_prompt_content
+                    logger.info(f"📝 Prompts dinâmicos aplicados: {len(dynamic_prompts)} caracteres")
+                
+                # Combinar funções da conversa + funções dos prompts dinâmicos
+                all_functions = bot_functions + prompt_functions
+                
+                # Reformatar dados para envio
+                final_system_prompt_content = system_prompt_content
+                
+            except json.JSONDecodeError:
+                logger.error(f"❌ Erro ao decodificar system_prompt JSON da conversa {conversation_id}")
+                return
+            
+            logger.info(f"🔧 Total de {len(all_functions)} funções preparadas para ChatGPT")
+            logger.info(f"🎯 Enviando para ChatGPT: system_prompt={len(final_system_prompt_content)} chars, functions={len(all_functions)}")
+            
+            # Buscar informações do bot para agent_name
+            bot_info = None
+            if channel.get('bot_id'):
+                bot_info = self._get_bot_data(channel['bot_id'])
+            
+            # Chamar ChatGPT com configuração otimizada
+            return self._process_chatgpt_response_internal(contact_id, None, final_system_prompt_content, all_functions, bot_info)
+                
+        except Exception as e:
+            logger.error(f"❌ Erro ao processar ChatGPT com conversation config: {e}")
+            import traceback
+            logger.error(f"❌ Traceback: {traceback.format_exc()}")
+    
+    def _get_bot_data(self, bot_id):
+        """Busca dados do bot"""
+        if not db_manager.enabled:
+            return None
+        
+        def _get_bot_operation(connection):
+            cursor = connection.cursor(dictionary=True)
+            query = """
+                SELECT id, name, system_prompt, integration_id
+                FROM bots
+                WHERE id = %s
+            """
+            cursor.execute(query, (bot_id,))
+            result = cursor.fetchone()
+            cursor.close()
+            return result
+        
+        return db_manager._execute_with_fresh_connection(_get_bot_operation)
+    
+    
+    def _get_dynamic_prompts_and_functions(self, contact, bot_id):
+        """TAREFA 4: Busca prompts dinâmicos baseados em eventos e suas funções"""
+        try:
+            prompts = []
+            all_prompt_functions = []
+            
+            # Buscar contato fresh do banco para garantir dados atualizados
+            fresh_contact = db_manager.get_contact(contact['id'])
+            if not fresh_contact:
+                logger.error(f"❌ Contato {contact['id']} não encontrado para verificação de prompts dinâmicos")
+                return '', []
+            
+            # Evento: 'email not informed'
+            if not fresh_contact.get('email'):
+                email_prompts_data = self._get_prompts_and_functions_by_rule(bot_id, 'email not informed')
+                for prompt_data in email_prompts_data:
+                    prompts.append(prompt_data['prompt'])
+                    prompt_functions_data = self._get_bot_functions(bot_id, prompt_data['id'])
+                    prompt_functions = self._build_chatgpt_functions_with_tools_format(prompt_functions_data, bot_id)
+                    all_prompt_functions.extend(prompt_functions)
+                logger.info(f"📧 Evento 'email not informed' disparado")
+            else:
+                logger.info(f"📧 Email já registrado ({fresh_contact.get('email')}) - não aplicando prompt 'email not informed'")
+            
+            # Evento: 'first contact'
+            if self._is_first_contact(fresh_contact['id']):
+                first_contact_prompts_data = self._get_prompts_and_functions_by_rule(bot_id, 'first contact')
+                for prompt_data in first_contact_prompts_data:
+                    prompts.append(prompt_data['prompt'])
+                    prompt_functions_data = self._get_bot_functions(bot_id, prompt_data['id'])
+                    prompt_functions = self._build_chatgpt_functions_with_tools_format(prompt_functions_data, bot_id)
+                    all_prompt_functions.extend(prompt_functions)
+                logger.info(f"👋 Evento 'first contact' disparado")
+            
+            return '\n'.join(prompts) if prompts else '', all_prompt_functions
+            
+        except Exception as e:
+            logger.error(f"❌ Erro ao buscar prompts dinâmicos: {e}")
+            return '', []
+    
+    def _get_prompts_and_functions_by_rule(self, bot_id, rule_display):
+        """Busca prompts completos por rule_display"""
+        if not db_manager.enabled:
+            return []
+        
+        def _get_prompts_operation(connection):
+            cursor = connection.cursor(dictionary=True)
+            query = """
+                SELECT id, prompt, description
+                FROM bots_prompts
+                WHERE bot_id = %s AND rule_display = %s
+            """
+            cursor.execute(query, (bot_id, rule_display))
+            results = cursor.fetchall()
+            cursor.close()
+            return results
+        
+        result = db_manager._execute_with_fresh_connection(_get_prompts_operation)
+        return result or []
+    
+    def _is_first_contact(self, contact_id):
+        """Verifica se é o primeiro contato do usuário (histórico geral)"""
+        if not db_manager.enabled:
+            return False
+        
+        def _check_first_contact_operation(connection):
+            cursor = connection.cursor()
+            query = """
+                SELECT COUNT(*) as total
+                FROM conversation_message cm
+                JOIN conversation c ON c.id = cm.conversation_id
+                WHERE c.contact_id = %s AND cm.sender = 'user'
+            """
+            cursor.execute(query, (contact_id,))
+            result = cursor.fetchone()
+            cursor.close()
+            return result[0] <= 1  # Primeira mensagem ou menos
+        
+        return db_manager._execute_with_fresh_connection(_check_first_contact_operation)
+    
+    def _get_bot_functions(self, bot_id, prompt_id=None):
+        """Busca funções associadas ao bot (e opcionalmente ao prompt)"""
+        if not db_manager.enabled:
+            return []
+        
+        def _get_bot_functions_operation(connection):
+            cursor = connection.cursor(dictionary=True)
+            
+            if prompt_id:
+                # Buscar funções específicas do prompt
+                query = """
+                    SELECT DISTINCT bf.function_id, bf.description
+                    FROM bots_functions bf
+                    JOIN bots_prompts_functions bpf ON bf.function_id = bpf.function_id 
+                        AND bf.bot_id = bpf.bot_id
+                    WHERE bf.bot_id = %s AND bpf.prompt_id = %s
+                """
+                cursor.execute(query, (bot_id, prompt_id))
+            else:
+                # Buscar funções gerais do bot (prompt_id NULL)
+                query = """
+                    SELECT DISTINCT bf.function_id, bf.description
+                    FROM bots_functions bf
+                    JOIN bots_prompts_functions bpf ON bf.function_id = bpf.function_id 
+                        AND bf.bot_id = bpf.bot_id
+                    WHERE bf.bot_id = %s AND bpf.prompt_id IS NULL
+                """
+                cursor.execute(query, (bot_id,))
+            
+            functions = cursor.fetchall()
+            cursor.close()
+            return functions
+        
+        result = db_manager._execute_with_fresh_connection(_get_bot_functions_operation)
+        return result or []
+    
+    def _get_function_parameters(self, function_id, bot_id=None):
+        """Busca parâmetros de uma função"""
+        if not db_manager.enabled:
+            return []
+        
+        def _get_function_parameters_operation(connection):
+            cursor = connection.cursor(dictionary=True)
+            if bot_id:
+                query = """
+                    SELECT parameter_id, type, description, permited_values, default_value, format
+                    FROM bots_functions_parameters
+                    WHERE function_id = %s AND bot_id = %s
+                """
+                cursor.execute(query, (function_id, bot_id))
+            else:
+                query = """
+                SELECT parameter_id, type, description, permited_values, default_value, format
+                FROM bots_functions_parameters
+                WHERE function_id = %s
+            """
+            cursor.execute(query, (function_id,))
+            parameters = cursor.fetchall()
+            cursor.close()
+            return parameters
+        
+        result = db_manager._execute_with_fresh_connection(_get_function_parameters_operation)
+        return result or []
+    
+    def _build_chatgpt_functions(self, functions_data, bot_id=None):
+        """Constrói o array de funções no formato do ChatGPT"""
+        chatgpt_functions = []
+        
+        for function in functions_data:
+            function_id = function['function_id']
+            description = function['description']
+            
+            # Buscar parâmetros da função
+            parameters = self._get_function_parameters(function_id, bot_id)
+            
+            # Construir properties e required
+            properties = {}
+            required = []
+            
+            for param in parameters:
+                param_name = param['parameter_id']
+                param_type = param['type']
+                param_description = param['description']
+                
+                required.append(param_name)
+                
+                property_def = {
+                    "type": param_type,
+                    "description": param_description
+                }
+                
+                # Adicionar enum se tiver valores permitidos
+                if param['permited_values']:
+                    try:
+                        permitted_values = json.loads(param['permited_values'])
+                        property_def["enum"] = permitted_values
+                    except:
+                        pass
+                
+                # Adicionar default se tiver
+                if param['default_value']:
+                    property_def["default"] = param['default_value']
+                
+                # Adicionar format se tiver
+                if param['format']:
+                    property_def["format"] = param['format']
+                
+                properties[param_name] = property_def
+            
+            # Construir função no formato ChatGPT
+            chatgpt_function = {
+                "name": function_id,
+                "description": description,
+                "parameters": {
+                    "type": "object",
+                    "properties": properties,
+                    "required": required
+                }
+            }
+            
+            chatgpt_functions.append(chatgpt_function)
+        
+        return chatgpt_functions
+    
+    def _build_chatgpt_functions_with_tools_format(self, functions_data, bot_id=None):
+        """Constrói o array de funções no formato tools do ChatGPT"""
+        chatgpt_tools = []
+        
+        for function in functions_data:
+            function_id = function['function_id']
+            description = function['description']
+            
+            # Buscar parâmetros da função
+            parameters = self._get_function_parameters(function_id, bot_id)
+            
+            # Construir properties e required
+            properties = {}
+            required = []
+            
+            for param in parameters:
+                param_name = param['parameter_id']
+                param_type = param['type']
+                param_description = param['description']
+                
+                required.append(param_name)
+                
+                property_def = {
+                    "type": param_type,
+                    "description": param_description
+                }
+                
+                # Adicionar enum se tiver valores permitidos
+                if param['permited_values']:
+                    try:
+                        import json
+                        permitted_values = json.loads(param['permited_values'])
+                        property_def["enum"] = permitted_values
+                    except:
+                        pass
+                
+                # Adicionar default se tiver
+                if param['default_value']:
+                    property_def["default"] = param['default_value']
+                
+                # Adicionar format se tiver
+                if param['format']:
+                    property_def["format"] = param['format']
+                
+                properties[param_name] = property_def
+            
+            # Construir tool no formato ChatGPT
+            chatgpt_tool = {
+                "type": "function",
+                "function": {
+                    "name": function_id,
+                    "description": description,
+                    "parameters": {
+                        "type": "object",
+                        "properties": properties,
+                        "required": required
+                    }
+                }
+            }
+            
+            chatgpt_tools.append(chatgpt_tool)
+        
+        return chatgpt_tools
     
     def _process_message_received(self, event_data):
         """Processa mensagem individual recebida"""
@@ -452,23 +1424,58 @@ class WebhookWorker:
         
         logger.info(f"💬 Processando mensagem {message_type} de {from_number} (ID: {message_id})")
         
-        # Só processa ChatGPT para o número autorizado em desenvolvimento
-        if from_number != '555496598592':
-            logger.info(f"Mensagem recebida de {from_number}, mas ChatGPT está restrito para desenvolvimento. Nenhuma ação tomada.")
-            return
+        # Processa mensagens de todos os números (restrição de desenvolvimento removida)
+        logger.info(f"Processando mensagem de {from_number} - desenvolvimento ativo para todos os números")
         
         # Remover verificação de cache local - deixar o delay worker gerenciar as duplicatas
         # O delay worker tem melhor controle sobre quais tarefas estão realmente ativas
         
-        # Implementar debounce usando timestamp da última mensagem
-        conversation = db_manager.get_active_conversation(from_number)
-        if conversation:
+        # Buscar contato UUID pelo número de telefone
+        contact_id = None
+        logger.info(f"📞 Buscando UUID do contato para número: {from_number}")
+        try:
+            def _get_contact_by_phone_operation(connection):
+                cursor = connection.cursor(dictionary=True)
+                query = """
+                    SELECT id, name, account_id, whatsapp_phone_number 
+                    FROM contacts 
+                    WHERE whatsapp_phone_number = %s
+                    LIMIT 1
+                """
+                cursor.execute(query, (from_number,))
+                result = cursor.fetchone()
+                cursor.close()
+                return result
+            
+            contact = db_manager._execute_with_fresh_connection(_get_contact_by_phone_operation)
+            if contact:
+                contact_id = contact['id']
+                logger.info(f"✅ Contato encontrado: {contact_id} para {from_number}")
+            else:
+                logger.warning(f"❌ Contato não encontrado para {from_number}")
+                logger.info(f"📝 Para criar conversa, é necessário processar via webhook_received completo")
+                logger.info(f"💡 Recomendação: Garantir que mensagens venham como webhook_received, não message_received individual")
+                return
+        except Exception as contact_error:
+            logger.error(f"❌ Erro ao buscar contato: {contact_error}")
+            return
+        
+        # Buscar conversa existente
+        conversation = db_manager.get_active_conversation(contact_id)
+        
+        if not conversation:
+            logger.warning(f"❌ Nenhuma conversa ativa encontrada para {from_number}")
+            logger.info(f"📝 Para criar conversa, é necessário processar via webhook_received completo")
+            logger.info(f"💡 Recomendação: Garantir que mensagens venham como webhook_received, não message_received individual")
+            return
+        
+        # Se encontrou conversa, continuar com debounce
             conversation_id = conversation['id']
             current_time = time.time()
             
             delay_task = {
                 'task_type': 'chatgpt_delay_check',
-                'contact_id': from_number,
+            'contact_id': contact_id,
                 'conversation_id': conversation_id,
                 'created_at': current_time,
                 'task_created_timestamp': current_time  # Timestamp de quando a tarefa foi criada
@@ -480,8 +1487,6 @@ class WebhookWorker:
                 logger.info(f"⏰ Tarefa de delay criada para {from_number} - aguardará 10s (timestamp: {current_time})")
             else:
                 logger.error(f"❌ Falha ao enviar tarefa de delay para {from_number}")
-        else:
-            logger.warning(f"Nenhuma conversa ativa encontrada para {from_number}")
     
     def _process_chatgpt_delay_check(self, event_data):
         """Processa verificação de delay do ChatGPT"""
@@ -490,6 +1495,16 @@ class WebhookWorker:
             conversation_id = event_data.get('conversation_id')
             created_at = event_data.get('created_at', 0)
             task_created_timestamp = event_data.get('task_created_timestamp', created_at)
+            
+            # NOVOS PARÂMETROS das tarefas 3 e 4
+            system_prompt = event_data.get('system_prompt')  # Manter compatibilidade com formato antigo
+            system_prompt_json = event_data.get('system_prompt_json')  # Novo formato JSON
+            chatgpt_functions = event_data.get('chatgpt_functions', [])
+            channel_id = event_data.get('channel_id')
+            bot_id = event_data.get('bot_id')
+            
+            # Usar system_prompt_json se disponível, senão usar system_prompt (fallback)
+            final_system_prompt = system_prompt_json if system_prompt_json else system_prompt
             
             logger.info(f"🔍 Processando delay check para {contact_id} (task criada em: {task_created_timestamp})")
             
@@ -590,10 +1605,10 @@ class WebhookWorker:
             logger.info(f"🔍 DEBUG - Agora: {agora}, Timestamp msg: {ts}, Diff: {diff:.1f}s")
             
             if diff >= 10:
-                # Já se passaram 10s, processar com ChatGPT
+                # Já se passaram 10s, processar com ChatGPT usando conversation.system_prompt
                 logger.info(f"📊 ETAPA 7 - ✅ 10s aguardados, enviando para ChatGPT...")
                 try:
-                    self._process_chatgpt_response(contact_id, None)
+                    self._process_chatgpt_with_conversation_config(contact_id, conversation_id)
                     logger.info(f"📊 ETAPA 7 - SUCESSO: ChatGPT processado com sucesso")
                 except Exception as e:
                     logger.error(f"📊 ETAPA 7 - ERRO no ChatGPT: {e}")
@@ -642,7 +1657,9 @@ class WebhookWorker:
                     else:
                         logger.info(f"📊 ETAPA 9 - Nenhuma mensagem nova, processando com ChatGPT...")
                         try:
-                            self._process_chatgpt_response(contact_id, None)
+                            self._process_chatgpt_response_with_bot_config(
+                                contact_id, None, final_system_prompt, chatgpt_functions, bot_id, channel_id
+                            )
                             logger.info(f"📊 ETAPA 9 - SUCESSO: ChatGPT processado com sucesso")
                         except Exception as e:
                             logger.error(f"📊 ETAPA 9 - ERRO no ChatGPT: {e}")
@@ -658,8 +1675,170 @@ class WebhookWorker:
             logger.error(f"❌ Traceback completo: {traceback.format_exc()}")
             raise
 
+    def _process_chatgpt_response_with_bot_config(self, contact_id, message_text, system_prompt=None, chatgpt_functions=None, bot_id=None, channel_id=None):
+        """Processa mensagem com ChatGPT usando configuração do bot"""
+        logger.info(f"🤖 Processando ChatGPT com bot_id={bot_id}, system_prompt={bool(system_prompt)}, funções={len(chatgpt_functions or [])}")
+        
+        # Fallback para método anterior se não tiver novos parâmetros
+        if not system_prompt:
+            return self._process_chatgpt_response(contact_id, message_text)
+        
+        return self._process_chatgpt_response_internal(contact_id, message_text, system_prompt, chatgpt_functions)
+    
+    def _process_chatgpt_response_internal(self, contact_id, message_text, system_prompt=None, chatgpt_functions=None, bot_info=None):
+        """Método interno para processar ChatGPT com parâmetros customizados"""
+        max_retries = 3
+        retry_count = 0
+        
+        while retry_count < max_retries:
+            try:
+                logger.info(f"🤖 Processando com ChatGPT customizado para {contact_id} (tentativa {retry_count + 1}/{max_retries})")
+                
+                # Importar serviços
+                try:
+                    from chatgpt_service import chatgpt_service
+                    from whatsapp_service import whatsapp_service
+                except ImportError as e:
+                    logger.error(f"❌ Erro ao importar serviços: {e}")
+                    retry_count += 1
+                    time.sleep(2 ** retry_count)
+                    continue
+                
+                # Gerar resposta com ChatGPT customizado
+                try:
+                    import signal
+                    
+                    def timeout_handler(signum, frame):
+                        raise TimeoutError("ChatGPT timeout")
+                    
+                    signal.signal(signal.SIGALRM, timeout_handler)
+                    signal.alarm(45)
+                    
+                    try:
+                        # Usar método customizado com system_prompt e funções
+                        if hasattr(chatgpt_service, 'process_message_with_config'):
+                            chatgpt_response = chatgpt_service.process_message_with_config(
+                                contact_id, message_text, system_prompt, chatgpt_functions
+                            )
+                        else:
+                            # Fallback para método padrão
+                            logger.warning("⚠️ process_message_with_config não disponível, usando método padrão")
+                            chatgpt_response = chatgpt_service.process_message(contact_id, message_text)
+                    finally:
+                        signal.alarm(0)
+                        
+                except TimeoutError:
+                    logger.error(f"⏰ Timeout no ChatGPT customizado para {contact_id}")
+                    retry_count += 1
+                    time.sleep(2 ** retry_count)
+                    continue
+                
+                # Processar resposta (mesmo código do método original)
+                if chatgpt_response:
+                    logger.info(f"✅ ChatGPT customizado respondeu: {str(chatgpt_response)[:50]}...")
+                    
+                    # Extrair informações da resposta
+                    if isinstance(chatgpt_response, dict):
+                        response_text = chatgpt_response.get("response", "")
+                        function_executed = chatgpt_response.get("function_executed", False)
+                        tokens_used = chatgpt_response.get("tokens_used", 0)
+                        request_payload = chatgpt_response.get("request_payload", {})
+                    else:
+                        response_text = str(chatgpt_response)
+                        function_executed = False
+                        tokens_used = 0
+                        request_payload = {}
+                    
+                    if response_text:
+                        # Buscar número de telefone do contato para envio via WhatsApp
+                        contact = db_manager.get_contact(contact_id)
+                        if contact and contact.get('whatsapp_phone_number'):
+                            phone_number = contact['whatsapp_phone_number']
+                            logger.info(f"📞 Enviando via WhatsApp para {phone_number} (contact: {contact_id})")
+                            
+                        # Enviar resposta via WhatsApp com prefixo do agent_name (se configurado)
+                            if bot_info and bot_info.get('agent_name'):
+                                agent_name = bot_info['agent_name']
+                                chatgpt_message_with_prefix = f"*{agent_name}:*\n{response_text}"
+                            else:
+                                # Se não tiver agent_name configurado, enviar sem prefixo
+                                chatgpt_message_with_prefix = response_text
+                            success = whatsapp_service.send_text_message(phone_number, chatgpt_message_with_prefix)
+                        else:
+                            logger.error(f"❌ Número de telefone não encontrado para contato {contact_id}")
+                            success = False
+                            
+                        if success:
+                            logger.info(f"✅ Resposta enviada via WhatsApp para {contact_id}")
+                            
+                            # Salvar resposta na conversa
+                            conversation = db_manager.get_active_conversation(contact_id)
+                            if conversation:
+                                conversation_id = conversation['id']
+                                
+                                # Converter request_payload para JSON string
+                                import json
+                                prompt_json = json.dumps(request_payload, ensure_ascii=False) if request_payload else None
+                                
+                                # Salvar no banco sem prefixo (já foi enviado com prefixo via WhatsApp)
+                                success = db_manager.insert_conversation_message(
+                                    conversation_id=conversation_id,
+                                    message_text=response_text,
+                                    sender='agent',
+                                    message_type='text',
+                                    timestamp=datetime.now(),
+                                    prompt=prompt_json,
+                                    tokens=tokens_used
+                                )
+                                
+                                logger.info(f"💾 Salvando resposta: tokens={tokens_used}, prompt_size={len(prompt_json) if prompt_json else 0} chars")
+                                if success:
+                                    logger.info(f"✅ Resposta salva na conversa {conversation_id}")
+                                else:
+                                    logger.warning(f"⚠️ Falha ao salvar resposta na conversa")
+                        else:
+                            logger.error(f"❌ Falha ao enviar resposta via WhatsApp para {contact_id}")
+                    else:
+                        # Se function_executed = False e response vazia → função silenciosa, continuar conversa
+                        if not function_executed:
+                            logger.info(f"🔄 Função silenciosa executada, chamando ChatGPT para continuar conversa...")
+                            
+                            # Buscar conversation_id antes de continuar
+                            conversation = db_manager.get_active_conversation(contact_id)
+                            if conversation:
+                                conversation_id = conversation['id']
+                                
+                                # Chamar ChatGPT novamente para continuar a conversa naturalmente
+                                try:
+                                    self._process_chatgpt_with_conversation_config(contact_id, conversation_id)
+                                    logger.info(f"✅ Conversa continuada após função silenciosa")
+                                except Exception as continue_error:
+                                    logger.error(f"❌ Erro ao continuar conversa: {continue_error}")
+                            else:
+                                logger.error(f"❌ Conversa não encontrada para continuar após função silenciosa")
+                        else:
+                            logger.warning(f"⚠️ ChatGPT retornou resposta vazia para {contact_id}")
+                    
+                    return True
+                else:
+                    logger.error(f"❌ ChatGPT não retornou resposta para {contact_id}")
+                    retry_count += 1
+                    time.sleep(2 ** retry_count)
+                    continue
+                    
+            except Exception as e:
+                logger.error(f"❌ Erro no processamento ChatGPT customizado (tentativa {retry_count + 1}): {e}")
+                retry_count += 1
+                if retry_count < max_retries:
+                    time.sleep(2 ** retry_count)
+                else:
+                    logger.error(f"❌ Falha após {max_retries} tentativas para {contact_id}")
+                    raise
+        
+        return False
+
     def _process_chatgpt_response(self, contact_id, message_text):
-        """Processa mensagem com ChatGPT e envia resposta"""
+        """Processa mensagem com ChatGPT e envia resposta (método legado)"""
         max_retries = 3
         retry_count = 0
         
@@ -741,12 +1920,10 @@ class WebhookWorker:
                                     if conversation:
                                         conversation_id = conversation['id']
                                         
-                                        # Adicionar prefixo na resposta do ChatGPT para salvar na conversa
-                                        chatgpt_response_with_prefix = f"*Plugger Assistente:*\n{response_text}"
-                                        
+                                        # Salvar no banco sem prefixo (será enviado com prefixo via WhatsApp)
                                         success = db_manager.insert_conversation_message(
                                             conversation_id=conversation_id,
-                                            message_text=chatgpt_response_with_prefix,
+                                            message_text=response_text,
                                             sender='agent',
                                             message_type='text',
                                             timestamp=datetime.now()
@@ -780,12 +1957,10 @@ class WebhookWorker:
                                 if conversation:
                                     conversation_id = conversation['id']
                                     
-                                    # Adicionar prefixo na resposta do ChatGPT para salvar na conversa
-                                    chatgpt_response_with_prefix = f"*Plugger Assistente:*\n{response_text}"
-                                    
+                                    # Salvar no banco sem prefixo (já foi enviado com prefixo via WhatsApp)
                                     success = db_manager.insert_conversation_message(
                                         conversation_id=conversation_id,
-                                        message_text=chatgpt_response_with_prefix,
+                                        message_text=response_text,
                                         sender='agent',
                                         message_type='text',
                                         timestamp=datetime.now()
@@ -810,7 +1985,26 @@ class WebhookWorker:
                         send_success = False
                         for send_attempt in range(3):
                             try:
-                                sent = whatsapp_service.process_outgoing_message(contact_id, response_text)
+                                # Buscar agent_name do bot (se disponível)
+                                agent_name = None
+                                try:
+                                    conversation = db_manager.get_active_conversation(contact_id)
+                                    if conversation and conversation.get('channel_id'):
+                                        channel = db_manager.get_channel(conversation['channel_id'])
+                                        if channel and channel.get('bot_id'):
+                                            bot_data = self._get_bot_data(channel['bot_id'])
+                                            if bot_data and bot_data.get('agent_name'):
+                                                agent_name = bot_data['agent_name']
+                                except Exception as e:
+                                    logger.warning(f"⚠️ Erro ao buscar agent_name do bot: {e}")
+                                
+                                # Enviar com prefixo via WhatsApp (se agent_name configurado)
+                                if agent_name:
+                                    chatgpt_message_with_prefix = f"*{agent_name}:*\n{response_text}"
+                                else:
+                                    # Se não tiver agent_name configurado, enviar sem prefixo
+                                    chatgpt_message_with_prefix = response_text
+                                sent = whatsapp_service.process_outgoing_message(contact_id, chatgpt_message_with_prefix)
                                 if sent:
                                     logger.info(f"📤 Resposta enviada com sucesso para {contact_id}")
                                     send_success = True

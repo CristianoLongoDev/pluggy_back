@@ -68,4 +68,13 @@ CHATGPT_DELAY_QUEUE = 'chatgpt_delay_check'
 # Configurações da Movidesk
 MOVIDESK_TOKEN = os.getenv('MOVIDESK_TOKEN', '')
 MOVIDESK_API_URL = 'https://api.movidesk.com/public/v1'
-MOVIDESK_PERSONS_ENDPOINT = f'{MOVIDESK_API_URL}/persons' 
+MOVIDESK_PERSONS_ENDPOINT = f'{MOVIDESK_API_URL}/persons'
+
+# Configurações do Supabase JWT (Nova API com Signing Keys)
+SUPABASE_URL = os.getenv('SUPABASE_URL', '')
+SUPABASE_ANON_KEY = os.getenv('SUPABASE_ANON_KEY', '')
+# URL das chaves públicas JWT (JWKS endpoint)
+SUPABASE_JWKS_URL = f"{SUPABASE_URL}/auth/v1/.well-known/jwks.json" if SUPABASE_URL else ''
+
+# Configurações JWT para WebSocket
+JWT_SECRET_KEY = os.getenv('JWT_SECRET_KEY', 'websocket-default-secret-key-change-in-production') 

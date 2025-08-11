@@ -8,8 +8,33 @@ metadata:
     nginx.ingress.kubernetes.io/ssl-redirect: "true"
     nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
     nginx.ingress.kubernetes.io/proxy-body-size: "10m"
-    nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
-    nginx.ingress.kubernetes.io/proxy-send-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/websocket-services: "websocket-service"
+    # Configurações específicas para WebSocket
+    nginx.ingress.kubernetes.io/proxy-set-header: |
+      Upgrade $http_upgrade
+      Connection "upgrade"
+      Host $host
+      X-Real-IP $remote_addr
+      X-Forwarded-For $proxy_add_x_forwarded_for
+      X-Forwarded-Proto $scheme
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      more_set_headers "Access-Control-Allow-Origin: *";
+      more_set_headers "Access-Control-Allow-Methods: GET, POST, OPTIONS, PUT, DELETE";
+      more_set_headers "Access-Control-Allow-Headers: DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,Authorization";
+    nginx.ingress.kubernetes.io/server-snippet: |
+      location /ws {
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_cache_bypass $http_upgrade;
+        proxy_pass http://websocket-service.whatsapp-webhook.svc.cluster.local:8765;
+      }
     cert-manager.io/cluster-issuer: "letsencrypt-prod"
 spec:
   tls:
@@ -56,6 +81,71 @@ spec:
             name: whatsapp-webhook-service
             port:
               number: 80
+      - path: /accounts
+        pathType: Prefix
+        backend:
+          service:
+            name: whatsapp-webhook-service
+            port:
+              number: 80
+      - path: /channels
+        pathType: Prefix
+        backend:
+          service:
+            name: whatsapp-webhook-service
+            port:
+              number: 80
+      - path: /bots
+        pathType: Prefix
+        backend:
+          service:
+            name: whatsapp-webhook-service
+            port:
+              number: 80
+      - path: /whatsapp
+        pathType: Prefix
+        backend:
+          service:
+            name: whatsapp-webhook-service
+            port:
+              number: 80
+      - path: /auth
+        pathType: Prefix
+        backend:
+          service:
+            name: whatsapp-webhook-service
+            port:
+              number: 80
+      - path: /integrations
+        pathType: Prefix
+        backend:
+          service:
+            name: whatsapp-webhook-service
+            port:
+              number: 80
+      - path: /bot
+        pathType: Prefix
+        backend:
+          service:
+            name: whatsapp-webhook-service
+            port:
+              number: 80
+      # WebSocket API endpoints (REST)
+      - path: /websocket
+        pathType: Prefix
+        backend:
+          service:
+            name: whatsapp-webhook-service
+            port:
+              number: 80
+      # WebSocket real-time connection
+      - path: /ws
+        pathType: Prefix
+        backend:
+          service:
+            name: websocket-service
+            port:
+              number: 8765
       # Frontend (deve ser por último)
       - path: /
         pathType: Prefix

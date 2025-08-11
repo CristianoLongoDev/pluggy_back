@@ -113,6 +113,10 @@ else
     exit 1
 fi
 
+# Deletar pod
+echo -e "${YELLOW}📊 Deletando pod...${NC}"
+kubectl delete pod -n "${NAMESPACE}" -l app=whatsapp-frontend
+
 # Aguardar deployment
 echo -e "${YELLOW}⏳ Aguardando pod ser criado...${NC}"
 sleep 10

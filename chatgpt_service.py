@@ -19,108 +19,16 @@ class ChatGPTService:
     def build_conversation_context(self, contact_id, limit=10):
         """Monta o contexto da conversa com as últimas mensagens da conversa ativa. Se o contato for novo, inclui o first_contact_prompt no system_prompt."""
         conversation_list = []
-        is_first_contact = False
-        should_include_email_function = False
         
         try:
-            # System prompt base
-            system_prompt_config = db_manager.get_config('system_prompt')
+            # System prompt base - usando padrão (bots customizados têm seu próprio system_prompt)
             system_prompt = {
                 "role": "system",
-                "content": str(system_prompt_config.get('content', 'Você é um assistente útil.'))
+                "content": "Você é um assistente útil."
             }
             
-            # Verificar se é primeiro contato REAL (não apenas na conversa atual)
-            try:
-                conversation_msgs = db_manager.get_conversation_context(contact_id, limit)
-                
-                # Verificar se já existe alguma mensagem do agent/assistant na conversa atual
-                has_agent_messages_current = any(msg.get('sender') == 'agent' for msg in conversation_msgs)
-                
-                # Verificar se o contato já existe no sistema (verdadeiro primeiro contato)
-                contact = db_manager.get_contact(contact_id)
-                contact_exists = contact is not None
-                has_email = contact and contact.get('email') and contact.get('email').strip()
-
-                # É primeiro contato REAL apenas se: contato não existe OU (contato existe mas nunca teve conversa com agent)
-                is_first_contact = not contact_exists or (contact_exists and not has_email and not has_agent_messages_current)
-                
-                logger.info(f"Análise de primeiro contato para {contact_id}:")
-                logger.info(f"  - Contato existe: {contact_exists}")
-                logger.info(f"  - Tem email: {has_email}")
-                logger.info(f"  - Mensagens do agent na conversa atual: {has_agent_messages_current}")
-                logger.info(f"  - É primeiro contato: {is_first_contact}")
-                
-            except Exception as e:
-                logger.warning(f"Erro ao verificar se é primeiro contato: {e}")
-                # Em caso de erro, considera como primeiro contato para garantir boa experiência
-                is_first_contact = True
-                contact_exists = False
-                has_email = False
-            
-            # Verificar se email foi registrado (usando dados já obtidos para otimização)
-            should_include_email_function = False
-            
-            # Se já está no cache, não precisa consultar banco
-            if contact_id in self._email_cache:
-                logger.info(f"Contato {contact_id} tem email registrado (cache) - não incluindo function")
-                should_include_email_function = False
-            elif 'has_email' in locals() and has_email:
-                # Usar informação já obtida na análise de primeiro contato
-                logger.info(f"Contato {contact_id} tem email registrado (já verificado) - não incluindo function")
-                # Adicionar ao cache para futuras otimizações
-                self._email_cache.add(contact_id)
-                should_include_email_function = False
-            elif 'has_email' in locals() and not has_email:
-                # Usar informação já obtida - não tem email
-                logger.info(f"Contato {contact_id} não tem email registrado - incluindo function")
-                should_include_email_function = True
-            else:
-                # Fallback - consultar banco apenas se não foi verificado anteriormente
-                try:
-                    contact = db_manager.get_contact(contact_id)
-                    has_email_fallback = contact and contact.get('email') and contact.get('email').strip()
-                    logger.info(f"Contato {contact_id} tem email registrado (fallback): {has_email_fallback}")
-                    
-                    if has_email_fallback:
-                        # Adicionar ao cache para evitar futuras consultas
-                        self._email_cache.add(contact_id)
-                        logger.info(f"Email encontrado - adicionando {contact_id} ao cache")
-                        should_include_email_function = False
-                    else:
-                        # Ainda não tem email - incluir function
-                        should_include_email_function = True
-                        logger.info(f"Email não encontrado - incluindo function para {contact_id}")
-                    
-                except Exception as e:
-                    logger.warning(f"Erro ao verificar email do contato: {e}")
-                    # Em caso de erro, incluir function para garantir captura
-                    should_include_email_function = True
-
-            if is_first_contact:
-                try:
-                    # Adicionar first_contact_prompt
-                    first_prompt = db_manager.get_config('first_contact_prompt')
-                    if first_prompt and isinstance(first_prompt, dict) and first_prompt.get('content'):
-                        logger.info(f"Adicionando prompt de primeiro contato para {contact_id}")
-                        system_prompt['content'] += '\n' + str(first_prompt['content'])
-                    else:
-                        logger.warning(f"Prompt de primeiro contato não encontrado ou inválido: {first_prompt}")
-                        
-                except Exception as e:
-                    logger.error(f"Erro ao buscar/aplicar prompts de primeiro contato: {e}")
-            
-            # Adicionar prompt de email enquanto não tiver email registrado
-            if should_include_email_function:
-                try:
-                    email_prompt = db_manager.get_config('get_email_prompt')
-                    if email_prompt and isinstance(email_prompt, dict) and email_prompt.get('content'):
-                        logger.info(f"Adicionando prompt de captura de email para {contact_id}")
-                        system_prompt['content'] += '\n' + str(email_prompt['content'])
-                    else:
-                        logger.warning(f"Prompt de captura de email não encontrado ou inválido: {email_prompt}")
-                except Exception as e:
-                    logger.error(f"Erro ao buscar/aplicar prompt de email: {e}")
+            # Buscar mensagens da conversa
+            conversation_msgs = db_manager.get_conversation_context(contact_id, limit)
 
             # Verificar se system_prompt tem content válido
             if not system_prompt.get('content'):
@@ -160,18 +68,18 @@ class ChatGPTService:
                 })
             
             logger.info(f"Contexto montado para {contact_id}: {len(conversation_list)} mensagens")
-            return conversation_list, should_include_email_function
+            return conversation_list
             
         except Exception as e:
             logger.error(f"Erro ao montar contexto para {contact_id}: {e}")
             # Retornar contexto mínimo em caso de erro
-            return [{"role": "system", "content": "Você é um assistente útil."}], False
+            return [{"role": "system", "content": "Você é um assistente útil."}]
     
     def generate_response(self, contact_id, user_message=None, ignore_cache=False):
         """Gera resposta usando ChatGPT"""
         try:
             # Montar contexto da conversa
-            conversation, should_include_email_function = self.build_conversation_context(contact_id)
+            conversation = self.build_conversation_context(contact_id)
             
             # Adicionar mensagem atual do usuário apenas se fornecida e não vazia
             if user_message and user_message.strip():
@@ -197,50 +105,7 @@ class ChatGPTService:
                 "presence_penalty": 0
             }
             
-            # Adicionar functions se for primeiro contato
-            if should_include_email_function:
-                try:
-                    email_function = db_manager.get_config('registrar_email_cliente')
-                    if email_function:
-                        # Se retornou uma lista, pegar o primeiro item
-                        if isinstance(email_function, list) and len(email_function) > 0:
-                            email_function = email_function[0]
-                        
-                        # Verificar se agora é um dict válido
-                        if isinstance(email_function, dict) and 'name' in email_function:
-                            payload["functions"] = [email_function]
-                            payload["function_call"] = "auto"
-                            logger.info(f"Adicionando function registrar_email_cliente para {contact_id}")
-                        else:
-                            logger.warning(f"Function registrar_email_cliente em formato inválido: {email_function}")
-                    else:
-                        logger.warning(f"Function registrar_email_cliente não encontrada ou inválida: {email_function}")
-                except Exception as e:
-                    logger.error(f"Erro ao adicionar function registrar_email_cliente: {e}")
-            
-            # Sempre incluir a função criar_ticket_atendimento para permitir criação de tickets
-            try:
-                ticket_function = db_manager.get_config('criar_ticket_atendimento')
-                if ticket_function:
-                    # Se retornou uma lista, pegar o primeiro item
-                    if isinstance(ticket_function, list) and len(ticket_function) > 0:
-                        ticket_function = ticket_function[0]
-                    
-                    # Verificar se é um dict válido
-                    if isinstance(ticket_function, dict) and 'name' in ticket_function:
-                        # Se já temos functions (email), adicionar à lista existente
-                        if "functions" in payload:
-                            payload["functions"].append(ticket_function)
-                        else:
-                            payload["functions"] = [ticket_function]
-                            payload["function_call"] = "auto"
-                        logger.info(f"Adicionando function criar_ticket_atendimento para {contact_id}")
-                    else:
-                        logger.warning(f"Function criar_ticket_atendimento em formato inválido: {ticket_function}")
-                else:
-                    logger.warning(f"Function criar_ticket_atendimento não encontrada")
-            except Exception as e:
-                logger.error(f"Erro ao adicionar function criar_ticket_atendimento: {e}")
+            # REMOVIDO: Sistema antigo de config - agora usa apenas sistema dinâmico de bots
             
             # Log detalhado das mensagens que serão enviadas ao ChatGPT
             logger.info("=== MENSAGENS PARA CHATGPT ===")
@@ -262,15 +127,9 @@ class ChatGPTService:
             if response.status_code == 200:
                 result = response.json()
                 
-                # Verificar se há function_call na resposta
+                # Verificar resposta (apenas texto - sem functions no modo simples)
                 message = result['choices'][0]['message']
-                
-                if 'function_call' in message:
-                    logger.info(f"ChatGPT retornou function_call: {message['function_call']['name']}")
-                    return self._process_function_call(contact_id, message, result)
-                else:
-                    # Resposta normal de texto
-                    chatgpt_response = message['content'].strip()
+                chatgpt_response = message['content'].strip()
                 logger.info(f"ChatGPT respondeu para {contact_id}: {chatgpt_response[:50]}...")
                 
                 return {
@@ -296,42 +155,51 @@ class ChatGPTService:
                 "raw_data": None
             }
     
-    def _process_function_call(self, contact_id, message, result):
-        """Processa function_calls do ChatGPT"""
+
+    
+    def _get_bot_integration_type(self, contact_id):
+        """Busca o tipo de integração do bot associado ao contato"""
         try:
-            function_name = message['function_call']['name']
-            function_args = message['function_call']['arguments']
+            def _get_integration_type_operation(connection):
+                cursor = connection.cursor(dictionary=True)
+                query = """
+                    SELECT i.integration_type 
+                    FROM contacts co
+                    JOIN conversation conv ON co.id = conv.contact_id AND conv.status = 'active'
+                    JOIN channels ch ON conv.channel_id = ch.id
+                    JOIN bots b ON ch.bot_id = b.id
+                    LEFT JOIN integrations i ON b.integration_id = i.id
+                    WHERE co.id = %s
+                    LIMIT 1
+                """
+                cursor.execute(query, (contact_id,))
+                result = cursor.fetchone()
+                cursor.close()
+                return result
             
-            logger.info(f"Processando function_call: {function_name} com args: {function_args}")
-            
-            if function_name == 'registrar_email_cliente':
-                return self._process_registrar_email(contact_id, function_args, result)
-            elif function_name == 'criar_ticket_atendimento':
-                return self._process_criar_ticket(contact_id, function_args, result)
+            integration_result = db_manager._execute_with_fresh_connection(_get_integration_type_operation)
+            if integration_result:
+                integration_type = integration_result.get('integration_type')
+                logger.info(f"🔍 Tipo de integração do bot para contato {contact_id}: {integration_type}")
+                return integration_type
             else:
-                logger.warning(f"Function não reconhecida: {function_name}")
-                return {
-                    "success": False,
-                    "error": f"Function não reconhecida: {function_name}",
-                    "raw_data": result
-                }
+                logger.info(f"🔍 Nenhuma integração encontrada para contato {contact_id}")
+                return None
                 
         except Exception as e:
-            logger.error(f"Erro ao processar function_call: {e}")
-            return {
-                "success": False,
-                "error": str(e),
-                "raw_data": result
-            }
+            logger.error(f"❌ Erro ao buscar tipo de integração: {e}")
+            return None
     
     def _process_registrar_email(self, contact_id, function_args, result):
         """Processa a function registrar_email_cliente"""
         try:
             import json
+            from datetime import datetime
             
             # Parse dos argumentos da function
             args = json.loads(function_args)
-            email = args.get('email')
+            # ChatGPT pode enviar 'email' ou 'e-mail'
+            email = args.get('email') or args.get('e-mail')
             
             if not email:
                 logger.error("Email não encontrado nos argumentos da function")
@@ -356,8 +224,12 @@ class ChatGPTService:
             if success:
                 logger.info(f"Email {email} salvo com sucesso para contato {contact_id}")
                 
+                # Verificar se o bot tem integração com Movidesk antes de integrar
+                integration_type = self._get_bot_integration_type(contact_id)
+                
+                if integration_type == 'movidesk':
                 # Integração com Movidesk - buscar ou criar pessoa
-                logger.info(f"🔗 INICIANDO integração Movidesk para {email}")
+                    logger.info(f"🔗 INICIANDO integração Movidesk para {email} (bot com integração movidesk)")
                 try:
                     from movidesk_service import movidesk_service
                     logger.info(f"🔗 Movidesk service importado com sucesso")
@@ -370,7 +242,10 @@ class ChatGPTService:
                         
                         # Obter nome do contato para a Movidesk
                         contact = db_manager.get_contact(contact_id)
-                        contact_name = contact.get('name') if contact else contact_id
+                        if contact and contact.get('name'):
+                            contact_name = contact.get('name')
+                        else:
+                            contact_name = 'Usuário WhatsApp'
                         logger.info(f"🔗 Nome do contato: {contact_name}")
                         
                         # Buscar ou criar pessoa na Movidesk
@@ -393,33 +268,47 @@ class ChatGPTService:
                     import traceback
                     logger.error(f"🔗 ❌ Traceback: {traceback.format_exc()}")
                     # Não falha o processo principal, apenas log do erro
+                else:
+                    logger.info(f"🔗 Bot não tem integração Movidesk (tipo: {integration_type}) - pulando integração")
                 
                 # Adicionar ao cache para evitar futuras consultas ao banco
                 self._email_cache.add(contact_id)
                 logger.info(f"Email registrado - adicionando {contact_id} ao cache")
                 
-                # Gerar nova resposta contexto após registrar email
-                logger.info(f"Email registrado - gerando nova resposta com contexto para {contact_id}")
-                new_result = self.generate_response(contact_id, None, ignore_cache=True)
+                # Email registrado com sucesso - processo interno transparente
+                logger.info(f"✅ Email {email} registrado silenciosamente para contato {contact_id}")
                 
-                if new_result and new_result.get("success"):
-                    logger.info(f"Nova resposta gerada após registrar email: {new_result.get('response', '')[:100]}...")
-                    return {
+                # Salvar mensagem de função no contexto (sender='function') - não envia WhatsApp
+                try:
+                    conversation = db_manager.get_active_conversation(contact_id)
+                    if conversation:
+                        function_message = f"Email do usuario registrado: {email}"
+                        tokens_used = result.get('usage', {}).get('total_tokens', 0) if result else 0
+                        
+                        success_save = db_manager.insert_conversation_message(
+                            conversation_id=conversation['id'],
+                            message_text=function_message,
+                            sender='function',  # Tipo especial para contexto apenas
+                            message_type='function_result',
+                            timestamp=datetime.now(),
+                            tokens=tokens_used
+                        )
+                        
+                        if success_save:
+                            logger.info(f"💾 Mensagem de função salva para contexto: {function_message}")
+                        else:
+                            logger.warning(f"⚠️ Falha ao salvar mensagem de função")
+                except Exception as save_error:
+                    logger.error(f"❌ Erro ao salvar mensagem de função: {save_error}")
+                
+                # Retornar sem resposta para registro completamente silencioso
+                return {
                         "success": True,
-                        "response": new_result.get('response', ''),
-                        "raw_data": new_result,
-                        "tokens_used": new_result.get('tokens_used', 0),
-                        "function_executed": False  # CORREÇÃO: Esta é uma resposta normal, não uma function
-                    }
-                else:
-                    # Fallback para resposta padrão se nova chamada falhar
-                    logger.warning(f"Nova chamada ChatGPT falhou, usando resposta padrão")
-                    return {
-                        "success": True,
-                        "response": f"Obrigado! Seu email {email} foi registrado com sucesso. Como posso ajudá-lo hoje?",
+                    "response": None,  # Nenhuma mensagem - registro totalmente silencioso
                         "raw_data": result,
-                        "tokens_used": result.get('usage', {}).get('total_tokens', 0),
-                        "function_executed": False  # CORREÇÃO: Resposta padrão também não é function
+                    "tokens_used": result.get('usage', {}).get('total_tokens', 0) if result else 0,
+                    "function_executed": False,  # IMPORTANTE: False = ChatGPT continua a conversa
+                    "email_registered": email
                     }
             else:
                 logger.error(f"Erro ao salvar email no banco para {contact_id}")
@@ -653,6 +542,168 @@ class ChatGPTService:
                 "raw_data": result
             }
     
+    def _get_function_action(self, contact_id, function_name):
+        """Busca a ação de uma função no banco de dados"""
+        try:
+            # Primeiro, buscar o bot_id através do contact_id
+            contact = db_manager.get_contact(contact_id)
+            if not contact:
+                logger.error(f"Contato {contact_id} não encontrado")
+                return None
+                
+            # Buscar conversa ativa para obter o bot_id
+            def _get_bot_id_operation(connection):
+                cursor = connection.cursor(dictionary=True)
+                query = """
+                    SELECT ch.bot_id 
+                    FROM conversation conv
+                    JOIN channels ch ON conv.channel_id = ch.id
+                    WHERE conv.contact_id = %s 
+                    AND conv.status = 'active'
+                    ORDER BY conv.started_at DESC
+                    LIMIT 1
+                """
+                cursor.execute(query, (contact_id,))
+                result = cursor.fetchone()
+                cursor.close()
+                return result
+            
+            bot_result = db_manager._execute_with_fresh_connection(_get_bot_id_operation)
+            if not bot_result:
+                logger.error(f"Bot ID não encontrado para contato {contact_id}")
+                return None
+                
+            bot_id = bot_result['bot_id']
+            logger.info(f"🔍 Bot ID encontrado: {bot_id} para função {function_name}")
+            
+            # Buscar a ação na tabela bots_functions
+            def _get_function_action_operation(connection):
+                cursor = connection.cursor(dictionary=True)
+                query = """
+                    SELECT action 
+                    FROM bots_functions 
+                    WHERE bot_id = %s AND function_id = %s
+                """
+                cursor.execute(query, (bot_id, function_name))
+                result = cursor.fetchone()
+                cursor.close()
+                return result
+            
+            action_result = db_manager._execute_with_fresh_connection(_get_function_action_operation)
+            if action_result:
+                action = action_result['action']
+                logger.info(f"🎯 Ação encontrada para função {function_name}: {action}")
+                return action
+            else:
+                logger.warning(f"❌ Ação não encontrada para função {function_name} no bot {bot_id}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"❌ Erro ao buscar ação da função {function_name}: {e}")
+            return None
+    
+    def _process_function_by_action(self, contact_id, function_name, function_args, result):
+        """Processa função baseado no campo action do banco"""
+        try:
+            logger.info(f"🚀 Processando função {function_name} baseado na ação do banco")
+            
+            # Buscar ação da função no banco
+            action = self._get_function_action(contact_id, function_name)
+            
+            if not action:
+                logger.warning(f"⚠️ Função {function_name} sem ação definida, executando simulação")
+                return self._execute_generic_function(function_name, function_args, result)
+            
+            logger.info(f"🎯 Executando ação: {action} para função {function_name}")
+            
+            # Dispatcher de ações
+            if action == "cria_ticket_movidesk":
+                return self._execute_action_cria_ticket_movidesk(contact_id, function_args, result)
+            elif action == "registrar_email_cliente":
+                return self._process_registrar_email(contact_id, function_args, result)
+            else:
+                logger.warning(f"⚠️ Ação '{action}' não implementada para função {function_name}")
+                return self._execute_generic_function(function_name, function_args, result)
+                
+        except Exception as e:
+            logger.error(f"❌ Erro ao processar função {function_name} por ação: {e}")
+            return {
+                "success": False,
+                "error": f"Erro ao processar função: {str(e)}",
+                "raw_data": result
+            }
+    
+    def _execute_action_cria_ticket_movidesk(self, contact_id, function_args, result):
+        """Executa a ação de criar ticket no Movidesk"""
+        logger.info(f"🎫 Executando ação: cria_ticket_movidesk")
+        
+        # Verificar se o bot tem integração com Movidesk
+        integration_type = self._get_bot_integration_type(contact_id)
+        
+        if integration_type != 'movidesk':
+            logger.error(f"❌ Tentativa de criar ticket Movidesk com bot de integração '{integration_type}' - operação não permitida")
+            return {
+                "success": False,
+                "error": f"Bot não tem integração Movidesk (tipo: {integration_type})",
+                "raw_data": result
+            }
+        
+        # Verificar se contato tem person_id, se não tiver, buscar/criar na Movidesk
+        contact = db_manager.get_contact(contact_id)
+        if not contact:
+            logger.error(f"Contato {contact_id} não encontrado")
+            return {
+                "success": False,
+                "error": "Contato não encontrado",
+                "raw_data": result
+            }
+        
+        person_id = contact.get('person_id')
+        
+        # Se não tem person_id, tentar buscar/criar na Movidesk usando o email
+        if not person_id and contact.get('email'):
+            logger.info(f"🔗 Contato sem person_id, buscando/criando na Movidesk para {contact['email']}")
+            from movidesk_service import MovideskService
+            movidesk_service = MovideskService()
+            
+            contact_name = contact.get('name', 'Usuário WhatsApp')
+            person_id = movidesk_service.get_or_create_person(contact_name, contact['email'])
+            
+            if person_id:
+                logger.info(f"🔗 ✅ Person_id obtido da Movidesk: {person_id}")
+                # Atualizar person_id no banco
+                person_update_success = db_manager.update_contact_person_id(contact_id, person_id)
+                if person_update_success:
+                    logger.info(f"🔗 ✅ Person_id {person_id} da Movidesk salvo para contato {contact_id}")
+                else:
+                    logger.error(f"🔗 ❌ Falha ao salvar person_id da Movidesk para contato {contact_id}")
+            else:
+                logger.error(f"🔗 ❌ Não foi possível obter person_id da Movidesk para {contact['email']}")
+        
+        # Agora chamar a função original de criar ticket
+        return self._process_criar_ticket(contact_id, function_args, result)
+    
+    def _execute_generic_function(self, function_name, function_args, result):
+        """Executa função genérica quando não há ação específica implementada"""
+        logger.info(f"🔧 Executando função genérica: {function_name}")
+        
+        try:
+            import json
+            args_dict = json.loads(function_args) if isinstance(function_args, str) else function_args
+            response_text = f"Função {function_name} executada com os parâmetros: {args_dict}"
+        except:
+            response_text = f"Função {function_name} executada com sucesso."
+        
+        return {
+            "success": True,
+            "response": response_text,
+            "function_executed": True,
+            "function_name": function_name,
+            "raw_data": result,
+            "tokens_used": result.get('usage', {}).get('total_tokens', 0) if result else 0,
+            "request_payload": {}
+            }
+    
     def process_message(self, contact_id, message_text=None):
         """Processa uma mensagem e retorna resposta do ChatGPT"""
         logger.info(f"Processando mensagem de {contact_id}: {str(message_text)[:50] if message_text else 'None'}...")
@@ -668,6 +719,226 @@ class ChatGPTService:
                 "response": "Desculpe, não consegui processar sua mensagem no momento. Tente novamente.",
                 "error": result.get('error', 'Erro desconhecido') if result else 'Erro desconhecido'
             }
+    
+    def process_message_with_config(self, contact_id, message_text=None, system_prompt=None, chatgpt_functions=None):
+        """Processa uma mensagem com configuração customizada (system_prompt e funções do bot)"""
+        logger.info(f"Processando mensagem customizada de {contact_id}: {str(message_text)[:50] if message_text else 'None'}...")
+        logger.info(f"System prompt customizado: {bool(system_prompt)}, Funções: {len(chatgpt_functions or [])}")
+        
+        # Gerar resposta com configuração customizada
+        result = self.generate_response_with_config(contact_id, message_text, system_prompt, chatgpt_functions)
+        if result and result.get("success"):
+            logger.info(f"Resposta ChatGPT customizada gerada para {contact_id}")
+            return result
+        else:
+            logger.error(f"Falha ao gerar resposta ChatGPT customizada: {result.get('error', 'Erro desconhecido') if result else 'Erro desconhecido'}")
+            return {
+                "success": False,
+                "response": "Desculpe, não consegui processar sua mensagem no momento. Tente novamente.",
+                "error": result.get('error', 'Erro desconhecido') if result else 'Erro desconhecido'
+            }
+    
+    def generate_response_with_config(self, contact_id, user_message=None, system_prompt=None, chatgpt_functions=None):
+        """Gera resposta usando configuração customizada do bot"""
+        try:
+            # Montar contexto da conversa usando system_prompt customizado
+            conversation = []
+            
+            # System prompt customizado do bot
+            if system_prompt:
+                # Verificar se system_prompt já é JSON formatado
+                try:
+                    import json
+                    if isinstance(system_prompt, str) and system_prompt.startswith('{"role":'):
+                        # JSON pronto, usar diretamente
+                        system_prompt_obj = json.loads(system_prompt)
+                        conversation.append(system_prompt_obj)
+                        logger.info(f"Usando system prompt JSON pronto ({len(system_prompt)} caracteres)")
+                    else:
+                        # Formato antigo (texto), formatar para JSON
+                        conversation.append({
+                            "role": "system",
+                            "content": system_prompt
+                        })
+                        logger.info(f"Usando system prompt customizado ({len(system_prompt)} caracteres)")
+                except (json.JSONDecodeError, TypeError):
+                    # Fallback para formato antigo
+                    conversation.append({
+                        "role": "system",
+                        "content": system_prompt
+                    })
+                    logger.info(f"Usando system prompt customizado (fallback) ({len(system_prompt)} caracteres)")
+            else:
+                # Fallback para system prompt padrão
+                conversation.append({
+                    "role": "system",
+                    "content": "Você é um assistente útil."
+                })
+                logger.info("Usando system prompt padrão (fallback)")
+            
+            # Buscar histórico da conversa
+            try:
+                conversation_msgs = db_manager.get_conversation_context(contact_id, limit=10)
+                
+                for msg in conversation_msgs:
+                    if msg['sender'] == 'user':
+                        conversation.append({
+                            "role": "user",
+                            "content": msg['message_text']
+                        })
+                    elif msg['sender'] == 'agent':
+                        # Remover prefixo antes de adicionar ao contexto
+                        content = msg['message_text']
+                        if content.startswith("*Plugger Assistente:*\n"):
+                            content = content[len("*Plugger Assistente:*\n"):]
+                        conversation.append({
+                            "role": "assistant",
+                            "content": content
+                        })
+                
+                logger.info(f"Adicionadas {len(conversation_msgs)} mensagens do histórico")
+                
+            except Exception as e:
+                logger.warning(f"Erro ao buscar contexto da conversa: {e}")
+            
+            # Adicionar mensagem atual do usuário
+            if user_message and user_message.strip():
+                conversation.append({
+                    "role": "user",
+                    "content": user_message
+                })
+            
+            # Configurar headers
+            headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json"
+            }
+            
+            # Configurar payload base
+            payload = {
+                "model": self.model,
+                "messages": conversation,
+                "max_tokens": self.max_tokens,
+                "temperature": 0.7,
+                "top_p": 1,
+                "frequency_penalty": 0,
+                "presence_penalty": 0
+            }
+            
+            # Adicionar tools customizadas do bot (novo formato ChatGPT)
+            if chatgpt_functions and len(chatgpt_functions) > 0:
+                payload["tools"] = chatgpt_functions
+                payload["tool_choice"] = "auto"
+                logger.info(f"Adicionadas {len(chatgpt_functions)} tools customizadas do bot")
+                
+                # Log das tools para debug
+                for tool in chatgpt_functions:
+                    if tool.get('type') == 'function' and 'function' in tool:
+                        func_name = tool['function'].get('name', 'N/A')
+                        func_desc = tool['function'].get('description', 'N/A')[:50]
+                        logger.info(f"  Tool: {func_name} - {func_desc}...")
+                    else:
+                        # Fallback para formato antigo
+                        func_name = tool.get('name', 'N/A')
+                        func_desc = tool.get('description', 'N/A')[:50]
+                        logger.info(f"  Tool (formato antigo): {func_name} - {func_desc}...")
+            
+            # Log detalhado das mensagens
+            logger.info("=== MENSAGENS CUSTOMIZADAS PARA CHATGPT ===")
+            for i, msg in enumerate(conversation):
+                content_preview = msg.get('content', '')[:100] if msg.get('content') else 'NULL/EMPTY'
+                logger.info(f"Msg {i+1}: role={msg.get('role')}, content='{content_preview}...'")
+            
+            logger.info(f"Enviando {len(conversation)} mensagens customizadas para ChatGPT")
+            
+            # Fazer requisição para ChatGPT
+            response = requests.post(
+                self.api_url,
+                headers=headers,
+                json=payload,
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                
+                # Verificar se há tool_calls na resposta (formato moderno)
+                message = result['choices'][0]['message']
+                
+                if 'tool_calls' in message and message['tool_calls']:
+                    tool_call = message['tool_calls'][0]  # Primeira tool call
+                    logger.info(f"ChatGPT retornou tool_call: {tool_call['function']['name']}")
+                    return self._process_custom_tool_call(contact_id, message, result, chatgpt_functions)
+                else:
+                    # Resposta normal de texto
+                    chatgpt_response = message['content'].strip()
+                    logger.info(f"ChatGPT customizado respondeu para {contact_id}: {chatgpt_response[:50]}...")
+                
+                return {
+                    "success": True,
+                    "response": chatgpt_response,
+                    "raw_data": result,
+                    "tokens_used": result.get('usage', {}).get('total_tokens', 0),
+                    "request_payload": payload
+                }
+            
+            else:
+                logger.error(f"Erro na API ChatGPT customizada: {response.status_code} - {response.text}")
+                return {
+                    "success": False,
+                    "error": f"API Error: {response.status_code}",
+                    "raw_data": response.text
+                }
+                
+        except Exception as e:
+            logger.error(f"Erro ao gerar resposta ChatGPT customizada para {contact_id}: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "raw_data": None
+            }
+    
+    def _process_custom_tool_call(self, contact_id, message, result, available_functions):
+        """Processa tool_calls customizadas do bot (novo formato ChatGPT)"""
+        try:
+            import json
+            tool_call = message['tool_calls'][0]  # Primeira tool call
+            function_name = tool_call['function']['name']
+            function_args = tool_call['function']['arguments']
+            
+            logger.info(f"Processando tool_call customizada: {function_name} com args: {function_args}")
+            
+            # Verificar se a função está disponível
+            function_found = False
+            for tool in available_functions or []:
+                if tool.get('type') == 'function' and 'function' in tool:
+                    if tool['function'].get('name') == function_name:
+                        function_found = True
+                        break
+                elif tool.get('name') == function_name:  # Fallback para formato antigo
+                    function_found = True
+                    break
+            
+            if not function_found:
+                logger.warning(f"Tool customizada não encontrada: {function_name}")
+                return {
+                    "success": False,
+                    "error": f"Tool não reconhecida: {function_name}",
+                    "raw_data": result
+                }
+            
+            # Buscar ação da função no banco e processar dinamicamente
+            return self._process_function_by_action(contact_id, function_name, function_args, result)
+                
+        except Exception as e:
+            logger.error(f"Erro ao processar tool_call customizada: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "raw_data": result
+            }
+
+
 
     def _upload_attachments_to_movidesk(self, ticket_id, attachments):
         """Faz upload dos anexos para o ticket no Movidesk"""
