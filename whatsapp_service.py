@@ -358,7 +358,7 @@ class WhatsAppService:
                 "error": str(e)
             }
     
-    def process_outgoing_message(self, contact_id, message_text):
+    def process_outgoing_message(self, contact_id, message_text, agent_name=None):
         """Processa envio de mensagem e salva resultado no banco"""
         logger.info(f"Processando envio para {contact_id}: {message_text[:50]}...")
         
@@ -366,7 +366,11 @@ class WhatsAppService:
         result = self.send_text_message(contact_id, message_text)
         
         # Criar mensagem com prefixo para salvar no banco (igual ao que foi enviado)
-        prefixed_message = f"*Plugger Assistente:*\n{message_text}"
+        # Usar agent_name se fornecido, senão usar padrão legacy
+        if agent_name:
+            prefixed_message = f"*{agent_name}:*\n{message_text}"
+        else:
+            prefixed_message = f"*Plugger Assistente:*\n{message_text}"
         
         if result["success"]:
             # Salvar como message_sent (confirmado) no banco

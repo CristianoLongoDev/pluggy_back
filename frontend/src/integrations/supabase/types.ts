@@ -7,36 +7,60 @@ export type Json =
   | Json[]
 
 export type Database = {
-  // Allows to automatically instanciate createClient with right options
+  // Allows to automatically instantiate createClient with right options
   // instead of createClient<Database, { PostgrestVersion: 'XX' }>(URL, KEY)
   __InternalSupabase: {
     PostgrestVersion: "12.2.12 (cd3cf9e)"
   }
   public: {
     Tables: {
+      jwt_hook_log: {
+        Row: {
+          created_at: string | null
+          event: Json | null
+          id: number
+        }
+        Insert: {
+          created_at?: string | null
+          event?: Json | null
+          id?: number
+        }
+        Update: {
+          created_at?: string | null
+          event?: Json | null
+          id?: number
+        }
+        Relationships: []
+      }
       profiles: {
         Row: {
+          account_id: string | null
           avatar_url: string | null
           created_at: string | null
           department: string | null
+          email: string | null
           full_name: string | null
           id: string
           role: string | null
           updated_at: string | null
         }
         Insert: {
+          account_id?: string | null
           avatar_url?: string | null
           created_at?: string | null
           department?: string | null
+          email?: string | null
           full_name?: string | null
           id: string
           role?: string | null
           updated_at?: string | null
         }
         Update: {
+          account_id?: string | null
           avatar_url?: string | null
           created_at?: string | null
           department?: string | null
+          email?: string | null
           full_name?: string | null
           id?: string
           role?: string | null
@@ -52,6 +76,10 @@ export type Database = {
       get_current_user_role: {
         Args: Record<PropertyKey, never>
         Returns: string
+      }
+      jwt_custom_claims: {
+        Args: { event: Json }
+        Returns: Json
       }
     }
     Enums: {

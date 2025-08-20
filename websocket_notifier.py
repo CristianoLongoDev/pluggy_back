@@ -98,19 +98,26 @@ class WebSocketNotifier:
     def _notify_message(self, message):
         """Notifica uma mensagem via WebSocket"""
         try:
-            # Preparar dados da mensagem para o frontend
+            # Preparar dados da mensagem para o frontend (padrão melhorado)
             message_data = {
-                "id": message["id"],
-                "conversation_id": message["conversation_id"],
-                "message_text": message["message_text"],
-                "sender": message["sender"],
-                "message_type": message["message_type"],
-                "timestamp": message["timestamp"].isoformat() if message["timestamp"] else None,
+                "id": message["id"],  # ID único da mensagem
+                "conversation_id": message["conversation_id"],  # CRÍTICO: Campo de agrupamento
+                "content": message["message_text"],  # Padronizar para 'content'
+                "sender": self._normalize_sender(message["sender"]),  # Padronizar valores
+                "timestamp": message["timestamp"].isoformat() if message["timestamp"] else None,  # ISO format
+                "channel": "whatsapp",  # Padrão para este sistema
+                "message_type": message["message_type"],  # Manter para compatibilidade
                 "tokens": message["tokens"],
-                "contact": {
-                    "id": message["contact_id"],
-                    "name": message["contact_name"],
-                    "phone": message["whatsapp_phone_number"]
+                "metadata": {
+                    "contact": {
+                        "id": message["contact_id"],
+                        "name": message["contact_name"],
+                        "phone": message["whatsapp_phone_number"]
+                    },
+                    "bot": {
+                        "name": message.get("bot_name"),
+                        "agent_name": message.get("bot_agent_name")
+                    }
                 }
             }
             
@@ -121,6 +128,16 @@ class WebSocketNotifier:
             
         except Exception as e:
             logger.error(f"❌ Erro ao notificar mensagem {message.get('id', 'unknown')}: {e}")
+    
+    def _normalize_sender(self, sender):
+        """Normaliza valores do campo sender"""
+        sender_mapping = {
+            "user": "customer",  # Usuário do WhatsApp = customer
+            "bot": "ai",         # Bot/IA = ai
+            "agent": "agent",    # Agente humano = agent
+            "system": "ai"       # Sistema = ai
+        }
+        return sender_mapping.get(sender, sender)
 
 # Instância global
 websocket_notifier = WebSocketNotifier()

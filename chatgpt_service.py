@@ -55,9 +55,23 @@ class ChatGPTService:
                 elif sender == 'agent':
                     role = 'assistant'
                     # Remover prefixo do assistente antes de enviar para ChatGPT para evitar duplicação
-                    if message_text.startswith("*Plugger Assistente:*\n"):
-                        message_text = message_text[len("*Plugger Assistente:*\n"):]
-                        logger.debug(f"Prefixo removido da mensagem do agent para contexto ChatGPT")
+                    # Verificar diferentes prefixos possíveis (legacy e dinâmico)
+                    prefixes_to_remove = ["*Plugger Assistente:*\n"]
+                    
+                    # Tentar remover qualquer prefixo no formato *Nome:*
+                    import re
+                    prefix_pattern = r'^\*[^:]+:\*\n'
+                    if re.match(prefix_pattern, message_text):
+                        # Encontrar onde termina o prefixo
+                        match = re.match(prefix_pattern, message_text)
+                        if match:
+                            message_text = message_text[match.end():]
+                            logger.debug(f"Prefixo dinâmico removido da mensagem do agent para contexto ChatGPT")
+                    else:
+                        # Fallback para prefixo legacy
+                        if message_text.startswith("*Plugger Assistente:*\n"):
+                            message_text = message_text[len("*Plugger Assistente:*\n"):]
+                            logger.debug(f"Prefixo legacy removido da mensagem do agent para contexto ChatGPT")
                 else:
                     logger.warning(f"Sender desconhecido '{sender}' na mensagem {i+1}, ignorando...")
                     continue  # Pular mensagens com sender inválido
@@ -464,10 +478,23 @@ class ChatGPTService:
                     # Enviar mensagem de confirmação no WhatsApp
                     mensagem_confirmacao = f"Pronto! ✅ Ticket {ticket_id} incluído com sucesso! 👍 Sua solicitação será analisada e em breve receberá retorno. Atendimento finalizado."
                     
+                    # Buscar agent_name do bot para usar no prefixo
+                    agent_name = None
+                    try:
+                        conversation = db_manager.get_active_conversation(contact_id)
+                        if conversation and conversation.get('channel_id'):
+                            channel = db_manager.get_channel(conversation['channel_id'])
+                            if channel and channel.get('bot_id'):
+                                bot = db_manager.get_bot(channel['bot_id'])
+                                if bot and bot.get('agent_name'):
+                                    agent_name = bot['agent_name']
+                    except Exception as e:
+                        logger.warning(f"⚠️ Erro ao buscar agent_name: {e}")
+                    
                     # Importar serviço WhatsApp e enviar mensagem
                     try:
                         from whatsapp_service import whatsapp_service
-                        enviado = whatsapp_service.process_outgoing_message(contact_id, mensagem_confirmacao)
+                        enviado = whatsapp_service.process_outgoing_message(contact_id, mensagem_confirmacao, agent_name)
                         if enviado:
                             logger.info(f"📤 Mensagem de confirmação enviada para {contact_id}")
                         else:
@@ -481,11 +508,11 @@ class ChatGPTService:
                         if conversation:
                             conversation_id = conversation['id']
                             
-                            # Salvar a mensagem de confirmação na conversa (com prefixo)
-                            mensagem_confirmacao_with_prefix = f"*Plugger Assistente:*\n{mensagem_confirmacao}"
+                            # Salvar a mensagem de confirmação na conversa (SEM prefixo)
+                            # O prefixo será adicionado apenas no envio via WhatsApp
                             db_manager.insert_conversation_message(
                                 conversation_id=conversation_id,
-                                message_text=mensagem_confirmacao_with_prefix,
+                                message_text=mensagem_confirmacao,  # Sem prefixo no banco
                                 sender='agent',
                                 message_type='text',
                                 timestamp=datetime.now()
@@ -605,6 +632,11 @@ class ChatGPTService:
     def _process_function_by_action(self, contact_id, function_name, function_args, result):
         """Processa função baseado no campo action do banco"""
         try:
+            # Ignorar função de identificação de intenção (apenas para uso interno)
+            if function_name == "identify_user_intent":
+                logger.info(f"🔍 Ignorando função interna identify_user_intent")
+                return self._execute_generic_function(function_name, function_args, result)
+            
             logger.info(f"🚀 Processando função {function_name} baseado na ação do banco")
             
             # Buscar ação da função no banco
@@ -621,6 +653,8 @@ class ChatGPTService:
                 return self._execute_action_cria_ticket_movidesk(contact_id, function_args, result)
             elif action == "registrar_email_cliente":
                 return self._process_registrar_email(contact_id, function_args, result)
+            elif action == "encerrar_conversa":
+                return self._execute_action_encerrar_conversa(contact_id, function_args, result)
             else:
                 logger.warning(f"⚠️ Ação '{action}' não implementada para função {function_name}")
                 return self._execute_generic_function(function_name, function_args, result)
@@ -789,8 +823,17 @@ class ChatGPTService:
                     elif msg['sender'] == 'agent':
                         # Remover prefixo antes de adicionar ao contexto
                         content = msg['message_text']
-                        if content.startswith("*Plugger Assistente:*\n"):
+                        
+                        # Remover qualquer prefixo no formato *Nome:*
+                        import re
+                        prefix_pattern = r'^\*[^:]+:\*\n'
+                        if re.match(prefix_pattern, content):
+                            match = re.match(prefix_pattern, content)
+                            if match:
+                                content = content[match.end():]
+                        elif content.startswith("*Plugger Assistente:*\n"):  # Fallback legacy
                             content = content[len("*Plugger Assistente:*\n"):]
+                            
                         conversation.append({
                             "role": "assistant",
                             "content": content
@@ -1103,6 +1146,90 @@ class ChatGPTService:
         except Exception as e:
             logger.error(f"❌ Erro no upload para Movidesk: {e}")
             return False
+    
+    def _execute_action_encerrar_conversa(self, contact_id, function_args, result):
+        """Executa a ação de encerrar conversa - altera status para 'closed'"""
+        try:
+            logger.info(f"🔒 Executando ação: encerrar_conversa para contact {contact_id}")
+            
+            # Buscar conversa ativa do contato
+            conversation = db_manager.get_active_conversation(contact_id)
+            if not conversation:
+                logger.error(f"❌ Nenhuma conversa ativa encontrada para contact {contact_id}")
+                return {
+                    "success": False,
+                    "error": "Nenhuma conversa ativa encontrada",
+                    "raw_data": result
+                }
+            
+            conversation_id = conversation['id']
+            logger.info(f"📋 Encerrando conversa {conversation_id} do contact {contact_id}")
+            
+            # Extrair argumentos da função (se fornecidos) ANTES de fechar
+            try:
+                import json
+                args = json.loads(function_args) if isinstance(function_args, str) else function_args
+                motivo = args.get('motivo', 'Solicitação do usuário')
+                mensagem_despedida = args.get('mensagem_despedida', 'Conversa encerrada. Obrigado pelo contato!')
+            except:
+                motivo = 'Solicitação do usuário'
+                mensagem_despedida = 'Conversa encerrada. Obrigado pelo contato!'
+                
+            logger.info(f"📝 Motivo do encerramento: {motivo}")
+            
+            # PRIMEIRO: Salvar a mensagem de encerramento na conversa SEM prefixo (antes de fechar)
+            # O prefixo será adicionado apenas no envio via WhatsApp
+            from datetime import datetime
+            save_success = db_manager.insert_conversation_message(
+                conversation_id=conversation_id,
+                message_text=mensagem_despedida,  # Salvar sem prefixo no banco
+                sender='agent',
+                message_type='text',
+                timestamp=datetime.now(),
+                prompt=None,
+                tokens=result.get('usage', {}).get('total_tokens', 0) if result else 0
+            )
+            
+            if save_success:
+                logger.info(f"💾 Mensagem de encerramento salva na conversa {conversation_id}")
+            else:
+                logger.warning(f"⚠️ Falha ao salvar mensagem de encerramento na conversa {conversation_id}")
+            
+            # DEPOIS: Atualizar status da conversa para 'closed'
+            success = db_manager.close_conversation(conversation_id)
+            
+            if success:
+                logger.info(f"✅ Conversa {conversation_id} encerrada com sucesso")
+                
+                # Resposta de confirmação (usar mensagem já definida)
+                response_text = mensagem_despedida
+                
+                return {
+                    "success": True,
+                    "response": response_text,
+                    "raw_data": result,
+                    "tokens_used": result.get('usage', {}).get('total_tokens', 0) if result else 0,
+                    "function_executed": True,
+                    "action": "encerrar_conversa",
+                    "conversation_id": conversation_id,
+                    "status": "closed",
+                    "motivo": motivo
+                }
+            else:
+                logger.error(f"❌ Falha ao encerrar conversa {conversation_id}")
+                return {
+                    "success": False,
+                    "error": "Falha ao atualizar status da conversa",
+                    "raw_data": result
+                }
+                
+        except Exception as e:
+            logger.error(f"❌ Erro ao executar ação encerrar_conversa: {e}")
+            return {
+                "success": False,
+                "error": f"Erro ao encerrar conversa: {str(e)}",
+                "raw_data": result
+            }
 
 # Instância global do serviço ChatGPT
 chatgpt_service = ChatGPTService() 

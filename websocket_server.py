@@ -321,9 +321,12 @@ class WebSocketServer:
             
             elif message_type == "get_messages":
                 # Cliente quer buscar mensagens de uma conversa específica
-                conversation_id_raw = data.get("data", {}).get("conversation_id")
+                message_data = data.get("data", {})
+                conversation_id_raw = message_data.get("conversation_id")
+                limit = message_data.get("limit", 50)  # Padrão: 50 mensagens
+                offset = message_data.get("offset", 0)  # Padrão: sem offset
                 
-                logger.info(f"🔍 DEBUG - conversation_id recebido: {conversation_id_raw} (tipo: {type(conversation_id_raw)})")
+                logger.info(f"🔍 DEBUG - Parâmetros recebidos: conversation_id={conversation_id_raw}, limit={limit}, offset={offset}")
                 
                 if not conversation_id_raw:
                     await websocket.send(json.dumps({
@@ -332,15 +335,17 @@ class WebSocketServer:
                     }))
                     return
                 
-                # Converter para integer se necessário
+                # Validar parâmetros
                 try:
                     conversation_id = int(conversation_id_raw)
-                    logger.info(f"✅ conversation_id convertido para int: {conversation_id}")
+                    limit = min(int(limit), 1000)  # Máximo de 1000 mensagens por requisição
+                    offset = max(int(offset), 0)   # Offset não pode ser negativo
+                    logger.info(f"✅ Parâmetros validados: conversation_id={conversation_id}, limit={limit}, offset={offset}")
                 except (ValueError, TypeError) as e:
-                    logger.error(f"❌ Erro ao converter conversation_id para int: {e}")
+                    logger.error(f"❌ Erro ao validar parâmetros: {e}")
                     await websocket.send(json.dumps({
                         "type": "error",
-                        "error": f"conversation_id deve ser um número válido, recebido: {conversation_id_raw}"
+                        "error": f"Parâmetros inválidos: conversation_id deve ser um número, limit e offset devem ser inteiros"
                     }))
                     return
                 
@@ -348,27 +353,90 @@ class WebSocketServer:
                     client_info = self.clients[client_id]
                     account_id = client_info.get("account_id")
                     
-                    # Buscar mensagens da conversa
-                    logger.info(f"📨 Cliente {client_id} solicitou mensagens da conversa {conversation_id}")
-                    messages = await self.get_conversation_messages(conversation_id, account_id)
+                    # Buscar mensagens da conversa com paginação
+                    logger.info(f"📨 Cliente {client_id} solicitou mensagens da conversa {conversation_id} (limit={limit}, offset={offset})")
+                    result = await self.get_conversation_messages(conversation_id, account_id, limit, offset)
+                    
+                    # Extrair mensagens e status da conversa
+                    if isinstance(result, dict):
+                        messages = result.get("messages", [])
+                        conversation_status = result.get("conversation_status")
+                    else:
+                        # Fallback para compatibilidade (se retornar formato antigo)
+                        messages = result if isinstance(result, list) else []
+                        conversation_status = None
                     
                     # Enviar mensagens para o cliente
                     response_data = {
                         "type": "messages_response",
                         "conversation_id": conversation_id,
                         "data": {
-                            "messages": messages
+                            "messages": messages,
+                            "conversation_status": conversation_status,  # NOVO CAMPO
+                            "pagination": {
+                                "limit": limit,
+                                "offset": offset,
+                                "total": len(messages),
+                                "has_more": len(messages) == limit  # Se retornou exatamente o limit, pode haver mais
+                            }
                         },
                         "timestamp": datetime.now().isoformat()
                     }
                     
-                    logger.info(f"🔍 DEBUG - Enviando resposta: type={response_data['type']}, conversation_id={response_data['conversation_id']}, total_messages={len(messages)}")
+                    logger.info(f"🔍 DEBUG - Enviando resposta: type={response_data['type']}, conversation_id={response_data['conversation_id']}, total_messages={len(messages)}, status={conversation_status}")
                     if messages:
                         logger.info(f"🔍 DEBUG - Primeira mensagem: {messages[0]}")
                         logger.info(f"🔍 DEBUG - Última mensagem: {messages[-1]}")
                     
                     await websocket.send(json.dumps(response_data))
-                    logger.info(f"📤 Enviadas {len(messages)} mensagens da conversa {conversation_id} para cliente {client_id}")
+                    logger.info(f"📤 Enviadas {len(messages)} mensagens da conversa {conversation_id} para cliente {client_id} (limit={limit}, offset={offset}, status={conversation_status})")
+            
+            elif message_type == "send_message":
+                # Cliente quer enviar uma mensagem
+                message_data = data.get("data", {})
+                conversation_id_raw = message_data.get("conversation_id")
+                content = message_data.get("content", "").strip()
+                sender = message_data.get("sender", "agent")
+                user_id = message_data.get("user_id")  # NOVO: Campo user_id
+                
+                logger.info(f"📤 Cliente {client_id} quer enviar mensagem: conversation_id={conversation_id_raw}, content='{content[:50]}...', sender={sender}, user_id={user_id}")
+                
+                if not conversation_id_raw or not content:
+                    await websocket.send(json.dumps({
+                        "type": "error",
+                        "error": "conversation_id e content são obrigatórios para send_message"
+                    }))
+                    return
+                
+                try:
+                    conversation_id = int(conversation_id_raw)
+                    
+                    if client_id in self.clients:
+                        client_info = self.clients[client_id]
+                        account_id = client_info.get("account_id")
+                        
+                        # Salvar mensagem no banco (agora com user_id)
+                        success = await self.save_outgoing_message(conversation_id, account_id, content, sender, user_id)
+                        
+                        if success:
+                            await websocket.send(json.dumps({
+                                "type": "message_sent",
+                                "conversation_id": conversation_id,
+                                "timestamp": datetime.now().isoformat()
+                            }))
+                            logger.info(f"✅ Mensagem enviada com sucesso pelo cliente {client_id} na conversa {conversation_id}")
+                        else:
+                            await websocket.send(json.dumps({
+                                "type": "error",
+                                "error": "Falha ao salvar mensagem"
+                            }))
+                            
+                except (ValueError, TypeError) as e:
+                    logger.error(f"❌ Erro ao processar send_message: {e}")
+                    await websocket.send(json.dumps({
+                        "type": "error",
+                        "error": "Parâmetros inválidos para send_message"
+                    }))
             
             elif message_type == "ping":
                 # Manter conexão viva
@@ -560,16 +628,49 @@ class WebSocketServer:
                 conversations = cursor.fetchall()
                 cursor.close()
                 
-                # Converter datetime para string para JSON
+                # Converter para formato padronizado
+                standardized_conversations = []
                 for conv in conversations:
-                    if conv.get('started_at'):
-                        conv['started_at'] = conv['started_at'].isoformat()
-                    if conv.get('ended_at'):
-                        conv['ended_at'] = conv['ended_at'].isoformat()
-                    if conv.get('last_message_time'):
-                        conv['last_message_time'] = conv['last_message_time'].isoformat()
+                    # Calcular unread_count (simplificado: assumir que mensagens não lidas são as do cliente)
+                    unread_count = 0  # Implementar lógica real depois se necessário
+                    
+                    # Determinar status padronizado
+                    status = self._normalize_conversation_status(conv.get('status'), conv.get('status_attendance'))
+                    
+                    standardized_conv = {
+                        "id": conv["id"],
+                        "customer_name": conv.get("contact_name", "Cliente"),
+                        "channel": "whatsapp",
+                        "status": status,
+                        "conversation_status": conv.get("status", "active"),  # NOVO: status original do banco
+                        "created_at": conv["started_at"].isoformat() if conv.get("started_at") else None,
+                        "updated_at": conv["last_message_time"].isoformat() if conv.get("last_message_time") else None,
+                        "last_message": conv.get("last_message", ""),
+                        "unread_count": unread_count,
+                        "metadata": {
+                            "contact": {
+                                "id": conv.get("contact_id"),
+                                "phone": conv.get("contact_phone"),
+                                "email": conv.get("contact_email")
+                            },
+                            "channel": {
+                                "id": conv.get("channel_id"),
+                                "name": conv.get("channel_name"),
+                                "type": conv.get("channel_type")
+                            },
+                            "bot": {
+                                "name": conv.get("bot_name"),
+                                "agent_name": conv.get("bot_agent_name")
+                            },
+                            "stats": {
+                                "message_count": conv.get("message_count", 0),
+                                "ended_at": conv["ended_at"].isoformat() if conv.get("ended_at") else None
+                            }
+                        }
+                    }
+                    standardized_conversations.append(standardized_conv)
                 
-                return conversations
+                return standardized_conversations
             
             conversations = db_manager._execute_with_fresh_connection(_get_conversations_operation)
             logger.info(f"✅ Encontradas {len(conversations)} conversas para account {account_id}")
@@ -579,37 +680,38 @@ class WebSocketServer:
             logger.error(f"❌ Erro ao buscar conversas do account {account_id}: {e}")
             return []
     
-    async def get_conversation_messages(self, conversation_id, account_id):
+    async def get_conversation_messages(self, conversation_id, account_id, limit=50, offset=0):
         """Busca todas as mensagens de uma conversa específica"""
         if not DB_AVAILABLE or not db_manager:
             logger.warning("⚠️ Database não disponível para buscar mensagens")
-            return []
+            return {"messages": [], "conversation_status": None}
         
         # Verificar se a conexão do banco está funcionando
         if not db_manager.enabled:
             logger.info("🔄 Tentando reconectar ao banco de dados...")
             if not db_manager.connect():
                 logger.warning("⚠️ Não foi possível conectar ao banco de dados")
-                return []
+                return {"messages": [], "conversation_status": None}
         
         try:
             def _get_messages_operation(connection):
                 cursor = connection.cursor(dictionary=True)
                 
-                # Primeiro verificar se a conversa pertence ao account (segurança)
+                # Primeiro verificar se a conversa pertence ao account e buscar status (segurança)
                 security_query = """
-                    SELECT c.id 
+                    SELECT c.id, c.status 
                     FROM conversation c
                     LEFT JOIN contacts ct ON c.contact_id = ct.id
                     WHERE c.id = %s AND ct.account_id = %s
                 """
                 cursor.execute(security_query, (conversation_id, account_id))
-                if not cursor.fetchone():
+                conversation_info = cursor.fetchone()
+                if not conversation_info:
                     cursor.close()
                     logger.warning(f"⚠️ Conversa {conversation_id} não pertence ao account {account_id}")
-                    return []
+                    return {"messages": [], "conversation_status": None}
                 
-                # Buscar mensagens da conversa com informações do bot
+                # Buscar mensagens da conversa com informações do bot (com paginação)
                 query = """
                     SELECT 
                         cm.id,
@@ -628,36 +730,153 @@ class WebSocketServer:
                     LEFT JOIN bots b ON ch.bot_id = b.id
                     WHERE cm.conversation_id = %s
                     ORDER BY cm.timestamp ASC
-                    LIMIT 1000
+                    LIMIT %s OFFSET %s
                 """
-                cursor.execute(query, (conversation_id,))
+                cursor.execute(query, (conversation_id, limit, offset))
                 messages = cursor.fetchall()
                 cursor.close()
                 
-                # Converter datetime para string para JSON
+                # Converter para formato padronizado
+                standardized_messages = []
                 for msg in messages:
-                    if msg.get('timestamp'):
-                        msg['timestamp'] = msg['timestamp'].isoformat()
-                    
-                    # Parsear metadata JSON se existir
-                    if msg.get('metadata'):
-                        try:
-                            if isinstance(msg['metadata'], str):
-                                msg['metadata'] = json.loads(msg['metadata'])
-                        except (json.JSONDecodeError, TypeError):
-                            msg['metadata'] = {}
-                    else:
-                        msg['metadata'] = {}
+                    standardized_msg = {
+                        "id": msg["id"],
+                        "conversation_id": msg["conversation_id"],
+                        "content": msg["message_text"],  # Padronizar para 'content'
+                        "sender": self._normalize_sender_value(msg["sender"]),  # Padronizar valores
+                        "timestamp": msg["timestamp"].isoformat() if msg.get("timestamp") else None,
+                        "channel": "whatsapp",
+                        "message_type": msg["message_type"],
+                        "tokens": msg.get("tokens", 0),
+                        "metadata": {
+                            "bot": {
+                                "name": msg.get("bot_name"),
+                                "agent_name": msg.get("bot_agent_name")
+                            },
+                            "prompt": msg.get("prompt")
+                        }
+                    }
+                    standardized_messages.append(standardized_msg)
                 
-                return messages
+                return {
+                    "messages": standardized_messages,
+                    "conversation_status": conversation_info["status"]
+                }
             
-            messages = db_manager._execute_with_fresh_connection(_get_messages_operation)
-            logger.info(f"✅ Encontradas {len(messages)} mensagens para conversa {conversation_id}")
-            return messages or []
+            result = db_manager._execute_with_fresh_connection(_get_messages_operation)
+            if result and isinstance(result, dict):
+                messages = result.get("messages", [])
+                conversation_status = result.get("conversation_status")
+                logger.info(f"✅ Encontradas {len(messages)} mensagens para conversa {conversation_id} (status: {conversation_status})")
+                return {
+                    "messages": messages,
+                    "conversation_status": conversation_status
+                }
+            else:
+                logger.warning(f"⚠️ Formato inesperado de retorno para conversa {conversation_id}")
+                return {"messages": [], "conversation_status": None}
             
         except Exception as e:
             logger.error(f"❌ Erro ao buscar mensagens da conversa {conversation_id}: {e}")
-            return []
+            return {"messages": [], "conversation_status": None}
+    
+    def _normalize_sender_value(self, sender):
+        """Normaliza valores do campo sender"""
+        sender_mapping = {
+            "user": "customer",  # Usuário do WhatsApp = customer
+            "bot": "ai",         # Bot/IA = ai
+            "agent": "agent",    # Agente humano = agent
+            "system": "ai"       # Sistema = ai
+        }
+        return sender_mapping.get(sender, sender)
+    
+    def _normalize_conversation_status(self, status, status_attendance):
+        """Normaliza status da conversa para ai|human|waiting"""
+        # Priorizar status_attendance se disponível
+        if status_attendance:
+            if status_attendance in ['human', 'agent']:
+                return "human"
+            elif status_attendance in ['ai', 'bot']:
+                return "ai"
+            elif status_attendance in ['waiting', 'pending']:
+                return "waiting"
+        
+        # Fallback para status principal
+        if status:
+            if status in ['closed', 'resolved']:
+                return "ai"  # Conversa encerrada pelo AI
+            elif status in ['active', 'open']:
+                return "ai"  # Assumir AI por padrão se ativo
+            elif status in ['waiting', 'pending']:
+                return "waiting"
+        
+        return "ai"  # Padrão
+    
+    async def save_outgoing_message(self, conversation_id, account_id, content, sender, user_id=None):
+        """Salva mensagem enviada pelo agente no banco de dados"""
+        try:
+            if not DB_AVAILABLE or not db_manager:
+                logger.warning("⚠️ Database não disponível para salvar mensagem")
+                return False
+            
+            # Verificar se a conversa pertence ao account (segurança)
+            def _verify_and_save_operation(connection):
+                cursor = connection.cursor(dictionary=True)
+                
+                # Verificar se a conversa pertence ao account
+                security_query = """
+                    SELECT c.id 
+                    FROM conversation c
+                    LEFT JOIN contacts ct ON c.contact_id = ct.id
+                    WHERE c.id = %s AND ct.account_id = %s
+                """
+                cursor.execute(security_query, (conversation_id, account_id))
+                if not cursor.fetchone():
+                    cursor.close()
+                    logger.warning(f"⚠️ Conversa {conversation_id} não pertence ao account {account_id}")
+                    return False
+                
+                # Salvar mensagem (agora com user_id)
+                from datetime import datetime
+                message_query = """
+                    INSERT INTO conversation_message 
+                    (conversation_id, message_text, sender, message_type, timestamp, user_id)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                """
+                cursor.execute(message_query, (
+                    conversation_id, 
+                    content, 
+                    sender, 
+                    'text', 
+                    datetime.now(),
+                    user_id
+                ))
+                
+                message_id = cursor.lastrowid
+                connection.commit()
+                cursor.close()
+                
+                return message_id
+            
+            message_id = db_manager._execute_with_fresh_connection(_verify_and_save_operation)
+            
+            if message_id:
+                logger.info(f"✅ Mensagem salva com ID {message_id} na conversa {conversation_id}")
+                
+                # Notificar via WebSocket para outros clientes
+                try:
+                    from websocket_notifier import notify_message_saved
+                    notify_message_saved(conversation_id, message_id, content, sender)
+                except Exception as notify_error:
+                    logger.warning(f"⚠️ Falha ao notificar WebSocket: {notify_error}")
+                
+                return True
+            else:
+                return False
+            
+        except Exception as e:
+            logger.error(f"❌ Erro ao salvar mensagem: {e}")
+            return False
     
     async def start_server(self):
         """Inicia o servidor WebSocket"""

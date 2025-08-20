@@ -36,21 +36,34 @@ class AudioTranscriptionService:
                 headers['Authorization'] = f'Bearer {access_token}'
                 logger.info("🔐 Usando autenticação WhatsApp para download")
             
+            logger.info(f"🌐 Fazendo requisição para: {audio_url}")
             response = requests.get(audio_url, headers=headers, timeout=timeout, stream=True)
+            logger.info(f"📡 Status da resposta: {response.status_code}")
+            logger.info(f"📋 Content-Type: {response.headers.get('content-type', 'unknown')}")
             response.raise_for_status()
             
             # Criar arquivo temporário
             temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.tmp')
+            logger.info(f"📁 Arquivo temporário criado: {temp_file.name}")
             
             # Baixar em chunks
+            total_size = 0
             for chunk in response.iter_content(chunk_size=8192):
                 if chunk:
                     temp_file.write(chunk)
+                    total_size += len(chunk)
             
             temp_file.close()
             
-            logger.info(f"✅ Áudio baixado com sucesso: {temp_file.name}")
-            return temp_file.name
+            logger.info(f"✅ Áudio baixado com sucesso: {temp_file.name} ({total_size} bytes)")
+            
+            # Verificar se o arquivo foi criado corretamente
+            if os.path.exists(temp_file.name) and os.path.getsize(temp_file.name) > 0:
+                logger.info(f"✅ Verificação do arquivo: OK ({os.path.getsize(temp_file.name)} bytes)")
+                return temp_file.name
+            else:
+                logger.error(f"❌ Arquivo baixado está vazio ou não foi criado")
+                return None
             
         except Exception as e:
             logger.error(f"❌ Erro ao baixar áudio: {e}")
@@ -66,46 +79,61 @@ class AudioTranscriptionService:
             
             logger.info(f"🔄 Convertendo áudio para MP3...")
             
-            # Verificar se ffmpeg está disponível
-            try:
-                subprocess.run(['ffmpeg', '-version'], 
-                             capture_output=True, check=True, timeout=5)
-            except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
-                logger.error("❌ ffmpeg não encontrado. Tentando sem conversão...")
-                # Se não tem ffmpeg, tentar usar o arquivo original
-                return input_file
+            # Usar caminho completo do ffmpeg
+            ffmpeg_path = '/usr/bin/ffmpeg'
+            logger.info(f"🔧 Tentando conversão com ffmpeg: {ffmpeg_path}")
             
             # Comando ffmpeg para conversão
             cmd = [
-                'ffmpeg', '-i', input_file,
-                '-acodec', 'mp3',
+                ffmpeg_path, '-i', input_file,
+                '-acodec', 'libmp3lame',  # Usar libmp3lame para melhor compatibilidade
                 '-ar', '16000',  # 16kHz sample rate (recomendado para Whisper)
                 '-ac', '1',      # Mono
+                '-f', 'mp3',     # Forçar formato MP3
                 '-y',            # Sobrescrever arquivo se existir
                 output_file
             ]
             
-            # Executar conversão com timeout
-            result = subprocess.run(
-                cmd, 
-                capture_output=True, 
-                text=True, 
-                timeout=60  # 1 minuto timeout
-            )
+            logger.info(f"🔧 Executando comando: {' '.join(cmd)}")
+            logger.info(f"📁 Arquivo entrada: {input_file} (existe: {os.path.exists(input_file)}, tamanho: {os.path.getsize(input_file) if os.path.exists(input_file) else 'N/A'} bytes)")
             
-            if result.returncode == 0:
-                logger.info(f"✅ Conversão concluída: {output_file}")
+            # Executar conversão com timeout
+            try:
+                result = subprocess.run(
+                    cmd, 
+                    capture_output=True, 
+                    text=True, 
+                    timeout=60  # 1 minuto timeout
+                )
                 
-                # Remover arquivo original
-                try:
-                    os.unlink(input_file)
-                except:
-                    pass
+                logger.info(f"🔍 FFmpeg return code: {result.returncode}")
+                if result.stdout:
+                    logger.info(f"🔍 FFmpeg stdout: {result.stdout}")
+                if result.stderr:
+                    logger.info(f"🔍 FFmpeg stderr: {result.stderr}")
+                
+                if result.returncode == 0:
+                    logger.info(f"✅ Conversão concluída: {output_file}")
+                    logger.info(f"📁 Arquivo saída: {output_file} (existe: {os.path.exists(output_file)}, tamanho: {os.path.getsize(output_file) if os.path.exists(output_file) else 'N/A'} bytes)")
                     
-                return output_file
-            else:
-                logger.error(f"❌ Erro na conversão ffmpeg: {result.stderr}")
-                # Retornar arquivo original se conversão falhar
+                    # Remover arquivo original
+                    try:
+                        os.unlink(input_file)
+                        logger.info(f"🗑️ Arquivo original removido: {input_file}")
+                    except Exception as cleanup_error:
+                        logger.warning(f"⚠️ Erro ao remover arquivo original: {cleanup_error}")
+                        
+                    return output_file
+                else:
+                    logger.error(f"❌ Erro na conversão ffmpeg (code {result.returncode}): {result.stderr}")
+                    # Retornar arquivo original se conversão falhar
+                    return input_file
+                    
+            except subprocess.TimeoutExpired:
+                logger.error("❌ Timeout na conversão ffmpeg (60s). Usando arquivo original...")
+                return input_file
+            except Exception as e:
+                logger.error(f"❌ Erro inesperado na conversão: {e}. Usando arquivo original...")
                 return input_file
                 
         except subprocess.TimeoutExpired:
@@ -135,6 +163,10 @@ class AudioTranscriptionService:
             
             logger.info(f"📊 Tamanho do arquivo: {file_size/1024:.1f}KB")
             
+            # Verificar se o arquivo tem extensão MP3 (esperado após conversão)
+            if not audio_file_path.endswith('.mp3'):
+                logger.warning(f"⚠️ Arquivo não é MP3: {audio_file_path} - pode haver problemas com a API")
+            
             # Configurar headers para requisição
             headers = {
                 'Authorization': f'Bearer {self.api_key}'
@@ -147,6 +179,11 @@ class AudioTranscriptionService:
                 'language': (None, 'pt')  # Forçar português
             }
             
+            logger.info(f"🚀 Enviando arquivo para OpenAI Whisper API...")
+            logger.info(f"🔧 URL: {self.api_url}")
+            logger.info(f"🔧 Modelo: {self.model}")
+            logger.info(f"🔧 Arquivo: {audio_file_path} ({file_size} bytes)")
+            
             # Fazer requisição para OpenAI Whisper
             response = requests.post(
                 self.api_url,
@@ -158,8 +195,11 @@ class AudioTranscriptionService:
             # Fechar arquivo
             files['file'].close()
             
+            logger.info(f"📡 Resposta da API: {response.status_code}")
+            
             if response.status_code == 200:
                 result = response.json()
+                logger.info(f"✅ Resposta recebida: {result}")
                 transcription = result.get('text', '').strip()
                 
                 if transcription:
@@ -169,7 +209,8 @@ class AudioTranscriptionService:
                     logger.warning("⚠️ Transcrição vazia")
                     return None
             else:
-                logger.error(f"❌ Erro na API Whisper: {response.status_code} - {response.text}")
+                logger.error(f"❌ Erro na API Whisper: {response.status_code}")
+                logger.error(f"❌ Resposta: {response.text}")
                 return None
                     
         except Exception as e:

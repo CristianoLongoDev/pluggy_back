@@ -13,6 +13,10 @@ from webhook_worker import WebhookWorker
 from rabbitmq_manager import rabbitmq_manager
 from config import CHATGPT_DELAY_QUEUE
 
+# Adicionar o diretório atual ao sys.path para importações
+import os
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
 # Configurar logging
 logging.basicConfig(
     level=logging.INFO,
@@ -42,24 +46,25 @@ class ChatGPTDelayWorker:
             
             logger.info(f"🕐 Recebida tarefa de delay: {message_data.get('task_type', 'unknown')}")
             
-            # Verificar se é uma tarefa de delay do ChatGPT
-            if message_data.get('task_type') == 'chatgpt_delay_check':
-                # Implementar delay real baseado no scheduled_time
-                scheduled_time = message_data.get('scheduled_time')
-                if scheduled_time:
-                    current_time = time.time()
-                    if current_time < scheduled_time:
-                        # Ainda não é hora de processar - aguardar o tempo necessário
-                        sleep_time = scheduled_time - current_time
-                        logger.info(f"⏳ Aguardando {sleep_time:.1f}s antes de processar (scheduled: {scheduled_time}, current: {current_time})")
-                        time.sleep(sleep_time)
-                        logger.info(f"✅ Delay de {sleep_time:.1f}s concluído, processando agora...")
+            # Processar APENAS tarefas de delay do ChatGPT
+            task_type = message_data.get('task_type')
+            
+            # Ignorar timeouts de conversa - só processar ChatGPT
+            if task_type == 'conversation_timeout':
+                logger.info(f"⏭️ Ignorando timeout de conversa, processando apenas ChatGPT")
+                ch.basic_ack(delivery_tag=method.delivery_tag)
+                return
+            
+            if task_type == 'chatgpt_delay_check':
+                # Processar IMEDIATAMENTE - sem delay
+                logger.info(f"🚀 Processando imediatamente sem delay")
                 
                 # Processar com proteção de timeout ROBUSTO
                 import signal
                 
                 def timeout_handler(signum, frame):
-                    raise TimeoutError("Timeout no processamento de delay check")
+                    logger.error("❌ Timeout no processamento de delay check")
+                    # Não fazer raise para não interromper o loop
                 
                 # Configurar timeout de 30 segundos (mais agressivo)
                 signal.signal(signal.SIGALRM, timeout_handler)
@@ -92,12 +97,13 @@ class ChatGPTDelayWorker:
                     return
                 finally:
                     signal.alarm(0)  # Cancelar timeout
-                    
+            
             else:
-                logger.warning(f"⚠️ Tipo de tarefa desconhecido: {message_data.get('task_type')}")
+                logger.warning(f"⚠️ Tipo de tarefa desconhecido: {task_type}")
             
             # Confirmar processamento da mensagem
             ch.basic_ack(delivery_tag=method.delivery_tag)
+            logger.info(f"✅ Tarefa processada e ACK enviado, voltando ao loop de consumo...")
             
         except json.JSONDecodeError as e:
             logger.error(f"❌ Erro ao decodificar JSON: {e}")
@@ -105,6 +111,8 @@ class ChatGPTDelayWorker:
             self.error_count += 1
         except Exception as e:
             logger.error(f"❌ Erro ao processar tarefa de delay: {e}")
+            import traceback
+            logger.error(f"📊 Stack trace completo: {traceback.format_exc()}")
             ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
             self.error_count += 1
     

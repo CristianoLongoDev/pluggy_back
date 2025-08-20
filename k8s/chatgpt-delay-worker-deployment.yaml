@@ -84,21 +84,21 @@ spec:
         livenessProbe:
           exec:
             command:
-            - python
+            - /bin/sh
             - -c
-            - "import sys; import os; sys.exit(0 if os.path.exists('/tmp/chatgpt_delay_worker.log') else 1)"
-          initialDelaySeconds: 30
+            - "test -f /tmp/chatgpt_delay_worker.log"
+          initialDelaySeconds: 60
           periodSeconds: 30
           timeoutSeconds: 5
-          failureThreshold: 3
+          failureThreshold: 5
         readinessProbe:
           exec:
             command:
             - /bin/sh
             - -c
-            - "test -f /tmp/chatgpt_delay_worker.log && echo 'Delay worker ready'"
-          initialDelaySeconds: 20
-          periodSeconds: 15
+            - "test -f /tmp/chatgpt_delay_worker.log"
+          initialDelaySeconds: 30
+          periodSeconds: 20
           timeoutSeconds: 5
           failureThreshold: 3
         volumeMounts:
@@ -113,4 +113,4 @@ spec:
       volumes:
       - name: tmp-logs
         emptyDir:
-          sizeLimit: 10Mi 
+          sizeLimit: 100Mi 

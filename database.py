@@ -856,7 +856,7 @@ class DatabaseManager:
         result = self._execute_with_fresh_connection(_close_conversation_operation)
         return result is not None
 
-    def insert_conversation_message(self, conversation_id, message_text, sender, message_type, timestamp=None, prompt=None, tokens=None, notify_websocket=True):
+    def insert_conversation_message(self, conversation_id, message_text, sender, message_type, timestamp=None, prompt=None, tokens=None, user_id=None, notify_websocket=True):
         """Insere uma mensagem na tabela conversation_message."""
         if not self.enabled:
             return False
@@ -868,10 +868,10 @@ class DatabaseManager:
         def _insert_conversation_message_operation(connection):
             cursor = connection.cursor()
             query = """
-                INSERT INTO conversation_message (conversation_id, message_text, sender, message_type, timestamp, prompt, tokens)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                INSERT INTO conversation_message (conversation_id, message_text, sender, message_type, timestamp, prompt, tokens, user_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             """
-            cursor.execute(query, (conversation_id, message_text, sender, message_type, timestamp, prompt, tokens))
+            cursor.execute(query, (conversation_id, message_text, sender, message_type, timestamp, prompt, tokens, user_id))
             message_id = cursor.lastrowid
             connection.commit()
             cursor.close()
@@ -1352,7 +1352,7 @@ class DatabaseManager:
         def _get_bot_operation(connection):
             cursor = connection.cursor(dictionary=True)
             query = """
-                SELECT id, account_id, name, system_prompt, integration_id, created_at
+                SELECT id, account_id, name, system_prompt, integration_id, agent_name, created_at
                 FROM bots WHERE id = %s
             """
             cursor.execute(query, (bot_id,))
@@ -1371,7 +1371,7 @@ class DatabaseManager:
         def _get_bots_by_account_operation(connection):
             cursor = connection.cursor(dictionary=True)
             query = """
-                SELECT id, account_id, name, system_prompt, integration_id, created_at
+                SELECT id, account_id, name, system_prompt, integration_id, agent_name, created_at
                 FROM bots WHERE account_id = %s
                 ORDER BY created_at DESC
             """
@@ -2495,6 +2495,253 @@ class DatabaseManager:
         
         result = self._execute_with_fresh_connection(_get_bot_functions_with_usage_operation)
         return result or []
+
+    # ==================== INTENTS CRUD ====================
+    
+    def insert_intent(self, intent_id, bot_id, name=None, intention=None, active=True, prompt=None, function_id=None):
+        """Insere uma nova intent na tabela intents."""
+        if not self.enabled:
+            return False
+        
+        def _insert_intent_operation(connection):
+            cursor = connection.cursor()
+            query = """
+                INSERT INTO intents (id, bot_id, name, intention, active, prompt, function_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """
+            try:
+                cursor.execute(query, (intent_id, bot_id, name, intention, active, prompt, function_id))
+                connection.commit()
+                cursor.close()
+                return True
+            except Exception as e:
+                logger.error(f"❌ Erro ao inserir intent no banco: {e}")
+                logger.error(f"Query: {query}")
+                logger.error(f"Parâmetros: intent_id={intent_id}, bot_id={bot_id}, name={name}, intention={intention[:50] if intention else None}..., active={active}, prompt={prompt[:50] if prompt else None}..., function_id={function_id}")
+                cursor.close()
+                raise e
+        
+        result = self._execute_with_fresh_connection(_insert_intent_operation)
+        return result is not None
+
+    def get_intent(self, intent_id, bot_id):
+        """Busca uma intent pelo ID e bot_id na tabela intents."""
+        if not self.enabled:
+            return None
+        
+        def _get_intent_operation(connection):
+            cursor = connection.cursor(dictionary=True)
+            query = """
+                SELECT id, bot_id, name, intention, active, prompt, function_id
+                FROM intents WHERE id = %s AND bot_id = %s
+            """
+            cursor.execute(query, (intent_id, bot_id))
+            intent = cursor.fetchone()
+            cursor.close()
+            return intent
+        
+        result = self._execute_with_fresh_connection(_get_intent_operation)
+        return result
+
+    def get_intents_by_bot(self, bot_id):
+        """Busca todas as intents de um bot específico."""
+        if not self.enabled:
+            return []
+        
+        def _get_intents_by_bot_operation(connection):
+            cursor = connection.cursor(dictionary=True)
+            query = """
+                SELECT id, bot_id, name, intention, active, prompt, function_id
+                FROM intents WHERE bot_id = %s
+                ORDER BY name ASC
+            """
+            cursor.execute(query, (bot_id,))
+            intents = cursor.fetchall()
+            cursor.close()
+            return intents
+        
+        result = self._execute_with_fresh_connection(_get_intents_by_bot_operation)
+        return result or []
+
+    def update_intent(self, intent_id, bot_id, name='__NOT_PROVIDED__', intention='__NOT_PROVIDED__', 
+                     active='__NOT_PROVIDED__', prompt='__NOT_PROVIDED__', function_id='__NOT_PROVIDED__'):
+        """Atualiza uma intent existente. Apenas os campos fornecidos são atualizados."""
+        if not self.enabled:
+            return False
+        
+        def _update_intent_operation(connection):
+            cursor = connection.cursor()
+            
+            # Construir query dinamicamente baseado nos campos fornecidos
+            update_fields = []
+            values = []
+            
+            if name != '__NOT_PROVIDED__':
+                update_fields.append("name = %s")
+                values.append(name)
+            
+            if intention != '__NOT_PROVIDED__':
+                update_fields.append("intention = %s")
+                values.append(intention)
+            
+            if active != '__NOT_PROVIDED__':
+                update_fields.append("active = %s")
+                values.append(active)
+            
+            if prompt != '__NOT_PROVIDED__':
+                update_fields.append("prompt = %s")
+                values.append(prompt)
+            
+            if function_id != '__NOT_PROVIDED__':
+                update_fields.append("function_id = %s")
+                values.append(function_id)
+            
+            if not update_fields:
+                cursor.close()
+                return False
+            
+            # Adicionar WHERE clause
+            values.extend([intent_id, bot_id])
+            
+            query = f"""
+                UPDATE intents 
+                SET {', '.join(update_fields)}
+                WHERE id = %s AND bot_id = %s
+            """
+            
+            try:
+                cursor.execute(query, values)
+                connection.commit()
+                rows_affected = cursor.rowcount
+                cursor.close()
+                return rows_affected > 0
+            except Exception as e:
+                logger.error(f"❌ Erro ao atualizar intent: {e}")
+                logger.error(f"Query: {query}")
+                logger.error(f"Values: {values}")
+                cursor.close()
+                raise e
+        
+        result = self._execute_with_fresh_connection(_update_intent_operation)
+        return result is not None and result
+
+    def delete_intent(self, intent_id, bot_id):
+        """Remove uma intent da tabela intents."""
+        if not self.enabled:
+            return False
+        
+        def _delete_intent_operation(connection):
+            cursor = connection.cursor()
+            query = """
+                DELETE FROM intents WHERE id = %s AND bot_id = %s
+            """
+            try:
+                cursor.execute(query, (intent_id, bot_id))
+                connection.commit()
+                rows_affected = cursor.rowcount
+                cursor.close()
+                return rows_affected > 0
+            except Exception as e:
+                logger.error(f"❌ Erro ao deletar intent: {e}")
+                cursor.close()
+                raise e
+        
+        result = self._execute_with_fresh_connection(_delete_intent_operation)
+        return result is not None and result
+
+    # ==================== BOTS FUNCTIONS ACTIONS ====================
+    
+    def get_bots_functions_actions(self, integration_type=None):
+        """Busca todas as ações disponíveis para funções de bots, opcionalmente filtradas por tipo de integração."""
+        if not self.enabled:
+            return []
+        
+        def _get_actions_operation(connection):
+            cursor = connection.cursor(dictionary=True)
+            
+            if integration_type:
+                query = """
+                    SELECT id, action, name, integration_type
+                    FROM bots_functions_actions 
+                    WHERE integration_type = %s OR integration_type IS NULL
+                    ORDER BY integration_type ASC, name ASC
+                """
+                cursor.execute(query, (integration_type,))
+            else:
+                query = """
+                    SELECT id, action, name, integration_type
+                    FROM bots_functions_actions 
+                    ORDER BY integration_type ASC, name ASC
+                """
+                cursor.execute(query)
+            
+            actions = cursor.fetchall()
+            cursor.close()
+            return actions
+        
+        result = self._execute_with_fresh_connection(_get_actions_operation)
+        return result or []
+
+    def get_conversation_by_id(self, conversation_id):
+        """Busca uma conversa pelo ID"""
+        if not self.enabled:
+            return None
+        
+        def _get_conversation_operation(connection):
+            cursor = connection.cursor(dictionary=True)
+            query = """
+                SELECT id, contact_id, channel_id, status, status_attendance, 
+                       started_at, ended_at
+                FROM conversation 
+                WHERE id = %s
+                LIMIT 1
+            """
+            cursor.execute(query, (conversation_id,))
+            result = cursor.fetchone()
+            cursor.close()
+            return result
+        
+        return self._execute_with_fresh_connection(_get_conversation_operation)
+
+    def get_contact_by_id(self, contact_id):
+        """Busca um contato pelo ID"""
+        if not self.enabled:
+            return None
+        
+        def _get_contact_operation(connection):
+            cursor = connection.cursor(dictionary=True)
+            query = """
+                SELECT id, account_id, name, whatsapp_phone_number, email
+                FROM contacts 
+                WHERE id = %s
+                LIMIT 1
+            """
+            cursor.execute(query, (contact_id,))
+            result = cursor.fetchone()
+            cursor.close()
+            return result
+        
+        return self._execute_with_fresh_connection(_get_contact_operation)
+
+    def update_conversation_status_attendance(self, conversation_id, status_attendance):
+        """Atualiza o status_attendance de uma conversa"""
+        if not self.enabled:
+            return False
+        
+        def _update_status_attendance_operation(connection):
+            cursor = connection.cursor()
+            query = """
+                UPDATE conversation 
+                SET status_attendance = %s
+                WHERE id = %s
+            """
+            cursor.execute(query, (status_attendance, conversation_id))
+            connection.commit()
+            affected_rows = cursor.rowcount
+            cursor.close()
+            return affected_rows > 0
+        
+        return self._execute_with_fresh_connection(_update_status_attendance_operation)
 
 
 

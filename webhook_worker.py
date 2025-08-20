@@ -98,6 +98,7 @@ class WebhookWorker:
                             from_phone_number = event_data.get('from')
                             sender = 'user'
                             message_type = event_data.get('type', 'unknown')
+                            logger.info(f"📎 WEBHOOK-DEBUG: Processando {message_type} - dados completos: {event_data}")
                             
                             # Filtrar reações - não criar conversa para reações
                             if message_type == 'reaction':
@@ -114,6 +115,7 @@ class WebhookWorker:
                                 # Só usar caption se existir e não for vazio
                                 caption = doc.get('caption')
                                 message_text = caption if caption and caption.strip() else None
+                                logger.info(f"📎 CAPTION-DEBUG: document - caption extraído: '{caption}', message_text final: '{message_text}'")
                             elif message_type == 'image':
                                 img = event_data.get('image', {})
                                 media_id = img.get('id')
@@ -122,6 +124,7 @@ class WebhookWorker:
                                 # Só usar caption se existir e não for vazio
                                 caption = img.get('caption')
                                 message_text = caption if caption and caption.strip() else None
+                                logger.info(f"📎 CAPTION-DEBUG: image - caption extraído: '{caption}', message_text final: '{message_text}'")
                             elif message_type == 'audio':
                                 audio = event_data.get('audio', {})
                                 media_id = audio.get('id')
@@ -211,10 +214,17 @@ class WebhookWorker:
                         # Inserir mensagem se tiver dados válidos
                         if conversation_id:
                             logger.info(f"🔍 DEBUG - conversation_id={conversation_id}, message_type='{message_type}', sender='{sender}', message_text='{message_text}'")
+                            logger.info(f"📎 WEBHOOK-DEBUG: Dados processados - media_id={media_id}, file_name={file_name}, message_text_length={len(message_text) if message_text else 0}")
+                            
+                            # DEBUG ESPECÍFICO: Verificar condição de anexo
+                            logger.info(f"🔍 CONDIÇÃO-DEBUG: message_type='{message_type}' in ['image', 'document', 'audio'] = {message_type in ['image', 'document', 'audio']}")
+                            logger.info(f"🔍 CONDIÇÃO-DEBUG: sender='{sender}' == 'user' = {sender == 'user'}")
+                            logger.info(f"🔍 CONDIÇÃO-DEBUG: Condição completa = {message_type in ['image', 'document', 'audio'] and sender == 'user'}")
                             
                             # REGRA ESPECIAL: Imagens, Documentos e Áudios  
                             if message_type in ['image', 'document', 'audio'] and sender == 'user':
-                                logger.info(f"📎 Processando {message_type} de {sender}")
+                                logger.info(f"📎 ATTACHMENT-DEBUG: Processando {message_type} de {sender}")
+                                logger.info(f"📎 ATTACHMENT-DEBUG: media_id={media_id}, media_type={media_type}, file_name={file_name}")
                                 
                                 # 1. Salvar caption se existir (como mensagem de texto)
                                 if message_text and message_text.strip():
@@ -226,7 +236,8 @@ class WebhookWorker:
                                                 message_text=message_text,
                                                 sender=sender,
                                                 message_type='text',  # Caption é salvo como text
-                                                timestamp=dt_timestamp
+                                                timestamp=dt_timestamp,
+                                                notify_websocket=True  # NOTIFICAR WEBSOCKET
                                             )
                                             if success:
                                                 logger.info(f"✅ Caption salvo como mensagem de texto")
@@ -268,7 +279,8 @@ class WebhookWorker:
                                                     message_text=transcricao_audio,
                                                     sender=sender,
                                                     message_type='text',
-                                                    timestamp=dt_timestamp
+                                                    timestamp=dt_timestamp,
+                                                    notify_websocket=True  # NOTIFICAR WEBSOCKET
                                                 )
                                                 if success:
                                                     logger.info(f"✅ Transcrição salva como texto")
@@ -279,22 +291,29 @@ class WebhookWorker:
                                     except Exception as transcription_error:
                                         logger.error(f"❌ Erro na transcrição: {transcription_error}")
                                 
-                                # 2. Salvar anexo na tabela conversation_attach
-                                if media_id:
+                                # 2. Salvar anexo na tabela conversation_attach (EXCETO áudio - já foi transcrito)
+                                if media_id and message_type != 'audio':
+                                    logger.info(f"📎 ATTACHMENT-DEBUG: Iniciando salvamento de anexo ({message_type})")
                                     logger.info(f"💾 Obtendo URL de download para media_id={media_id}")
                                     
-                                    # Preparar file_extension baseado no mime_type
+                                    # Preparar file_extension baseado no mime_type (apenas a extensão, não o mime_type completo)
                                     file_extension = None
                                     if media_type:
                                         if message_type == 'image':
                                             # Para imagens, extrair extensão do mime_type (ex: image/jpeg -> .jpeg)
-                                            file_extension = f".{media_type.split('/')[-1]}" if '/' in media_type else None
+                                            mime_base = media_type.split(';')[0].strip()  # Remove codecs
+                                            file_extension = f".{mime_base.split('/')[-1]}" if '/' in mime_base else None
                                         elif message_type == 'document':
-                                            # Para documentos, o file_name já tem extensão, mas vamos salvar o mime_type para referência
-                                            file_extension = media_type
+                                            # Para documentos, extrair extensão do mime_type ou usar o nome do arquivo
+                                            if file_name and '.' in file_name:
+                                                file_extension = '.' + file_name.split('.')[-1]
+                                            else:
+                                                mime_base = media_type.split(';')[0].strip()
+                                                file_extension = f".{mime_base.split('/')[-1]}" if '/' in mime_base else None
                                         elif message_type == 'audio':
-                                            # Para áudios, extrair extensão do mime_type
-                                            file_extension = f".{media_type.split('/')[-1]}" if '/' in media_type else '.ogg'
+                                            # Para áudios, extrair extensão do mime_type (ex: audio/ogg; codecs=opus -> .ogg)
+                                            mime_base = media_type.split(';')[0].strip()  # Remove codecs
+                                            file_extension = f".{mime_base.split('/')[-1]}" if '/' in mime_base else '.ogg'
                                     
                                     logger.info(f"📎 Dados do anexo - Tipo: {message_type}, Mime: {media_type}, Extensão: {file_extension}, Nome: {file_name}")
                                     
@@ -349,7 +368,8 @@ class WebhookWorker:
                                             logger.warning(f"Erro ao salvar anexo (tentativa {attach_attempt + 1}): {attach_error}")
                                             time.sleep(1)
                                 else:
-                                    logger.warning(f"⚠️ media_id não encontrado para {message_type}")
+                                    logger.warning(f"📎 ATTACHMENT-DEBUG: ❌ media_id não encontrado para {message_type}")
+                                    logger.warning(f"📎 ATTACHMENT-DEBUG: event_data completo: {event_data}")
                                 
                                 # 3. SEMPRE salvar mensagem de contexto sobre o arquivo anexado
                                 arquivo_nome = file_name if file_name else f"arquivo.{message_type}"
@@ -376,7 +396,8 @@ class WebhookWorker:
                                             message_text=contexto_mensagem,
                                             sender=sender,
                                             message_type='text',  # Contexto como text para contar no delay
-                                            timestamp=dt_timestamp
+                                            timestamp=dt_timestamp,
+                                            notify_websocket=True  # NOTIFICAR WEBSOCKET
                                         )
                                         if success:
                                             logger.info(f"✅ Mensagem de contexto salva com sucesso")
@@ -397,7 +418,8 @@ class WebhookWorker:
                                             message_text=message_text,
                                             sender=sender,
                                             message_type=message_type,
-                                            timestamp=dt_timestamp
+                                            timestamp=dt_timestamp,
+                                            notify_websocket=True  # NOTIFICAR WEBSOCKET
                                         )
                                         if success:
                                             logger.info(f"✅ Mensagem salva com sucesso na conversation_message")
@@ -423,6 +445,8 @@ class WebhookWorker:
                         self._process_message_received(event_data)
                     elif event_type == 'chatgpt_delay_check':
                         self._process_chatgpt_delay_check(event_data)
+                    elif event_type == 'conversation_timeout':
+                        self._process_conversation_timeout(event_data)
                     elif event_type == 'status_update':
                         self._process_status_update(event_data)
                     elif 'error' in event_type:
@@ -473,9 +497,13 @@ class WebhookWorker:
                     
                     # TAREFA 1: Processar apenas webhooks com messages, ignorar statuses
                     if 'messages' in value:
+                        logger.info(f"📱 WEBHOOK-DEBUG: Recebido webhook com messages: {len(value['messages'])} mensagem(ns)")
+                        logger.info(f"📱 WEBHOOK-DEBUG: Conteúdo completo do webhook: {json.dumps(value, indent=2)}")
                         logger.info(f"📱 Processando webhook com {len(value['messages'])} mensagens")
                         self._process_whatsapp_messages(value, entry)
                     elif 'statuses' in value:
+                        logger.info(f"📊 WEBHOOK-DEBUG: Recebido webhook com statuses: {len(value['statuses'])} status(es)")
+                        logger.info(f"📊 WEBHOOK-DEBUG: Conteúdo completo do webhook: {json.dumps(value, indent=2)}")
                         logger.info(f"📊 Ignorando webhook com statuses: {len(value['statuses'])} status(es)")
                     else:
                         logger.warning(f"⚠️ Webhook sem messages nem statuses: {list(value.keys())}")
@@ -563,19 +591,33 @@ class WebhookWorker:
         """Processa uma mensagem individual"""
         try:
             from_number = message.get('from')
+            message_type = message.get('type', 'unknown')
+            
+            # FILTRO: Ignorar reações - não devem criar conversa nem ser processadas
+            if message_type == 'reaction':
+                logger.info(f"🔇 Reação de {from_number} ignorada - tipo 'reaction' não é processado")
+                return
+            
             message_text = self._extract_message_text(message)
             
             if not from_number:
                 logger.error("❌ Número do remetente não encontrado na mensagem")
                 return
             
-            logger.info(f"💬 Processando mensagem de {from_number}: {message_text[:50]}...")
+            logger.info(f"💬 Processando mensagem {message_type} de {from_number}: {message_text[:50]}...")
             
             # TAREFA 2: Buscar/criar contato
             contact = self._get_or_create_contact(from_number, value, channel['account_id'])
             if not contact:
                 logger.error(f"❌ Falha ao obter/criar contato para {from_number}")
                 return
+            
+            # ADICIONAR PROCESSAMENTO DE ANEXOS AQUI ANTES DE PROCESSAR CONVERSA
+            self._process_message_attachments(message, contact['id'], channel['id'])
+            
+            # AGENDAR TIMEOUT DE 1H SE É MENSAGEM DO USUÁRIO
+            if from_number and message_text:  # Só para mensagens válidas do usuário
+                self._schedule_conversation_timeout(contact['id'])
             
             # TAREFA 3: Processar conversa com novos parâmetros
             self._process_conversation_with_channel(contact, channel, message, message_text, bot)
@@ -585,19 +627,257 @@ class WebhookWorker:
             import traceback
             logger.error(f"Traceback: {traceback.format_exc()}")
     
+    def _process_message_attachments(self, message, contact_id, channel_id):
+        """Processa anexos da mensagem (imagens, documentos, áudios)"""
+        try:
+            message_type = message.get('type', 'unknown')
+            sender = 'user'  # No contexto atual, sempre é o usuário enviando
+            
+            # Extrair dados de mídia baseado no tipo
+            media_id = None
+            media_type = None
+            file_name = None
+            message_text = None
+            
+            logger.info(f"📎 WEBHOOK-DEBUG: Processando {message_type} - dados completos: {message}")
+            
+            if message_type == 'document':
+                doc = message.get('document', {})
+                media_id = doc.get('id')
+                media_type = doc.get('mime_type')
+                file_name = doc.get('filename')
+                caption = doc.get('caption')
+                message_text = caption if caption and caption.strip() else None
+                logger.info(f"📎 CAPTION-DEBUG: document - caption extraído: '{caption}', message_text final: '{message_text}'")
+            elif message_type == 'image':
+                img = message.get('image', {})
+                media_id = img.get('id')
+                media_type = img.get('mime_type')
+                file_name = img.get('filename') if 'filename' in img else None
+                caption = img.get('caption')
+                message_text = caption if caption and caption.strip() else None
+                logger.info(f"📎 CAPTION-DEBUG: image - caption extraído: '{caption}', message_text final: '{message_text}'")
+            elif message_type == 'audio':
+                audio = message.get('audio', {})
+                media_id = audio.get('id')
+                media_type = audio.get('mime_type')
+                file_name = audio.get('filename') if 'filename' in audio else f"audio.{media_type.split('/')[-1] if media_type else 'ogg'}"
+                message_text = None  # Será preenchido com transcrição se possível
+            
+            # Debug das condições
+            logger.info(f"🔍 CONDIÇÃO-DEBUG: message_type='{message_type}' in ['image', 'document', 'audio'] = {message_type in ['image', 'document', 'audio']}")
+            logger.info(f"🔍 CONDIÇÃO-DEBUG: sender='{sender}' == 'user' = {sender == 'user'}")
+            logger.info(f"🔍 CONDIÇÃO-DEBUG: Condição completa = {message_type in ['image', 'document', 'audio'] and sender == 'user'}")
+            logger.info(f"📎 WEBHOOK-DEBUG: Dados processados - media_id={media_id}, file_name={file_name}, message_text_length={len(message_text) if message_text else 0}")
+            
+            # REGRA ESPECIAL: Imagens, Documentos e Áudios  
+            if message_type in ['image', 'document', 'audio'] and sender == 'user':
+                logger.info(f"📎 ATTACHMENT-DEBUG: Processando {message_type} de {sender}")
+                logger.info(f"📎 ATTACHMENT-DEBUG: media_id={media_id}, media_type={media_type}, file_name={file_name}")
+                
+                # Buscar conversa para obter conversation_id
+                conversation_id = None
+                try:
+                    # Buscar conversa existente ou criar nova (seguindo padrão do código)
+                    conversation = db_manager.get_active_conversation(contact_id)
+                    if not conversation:
+                        logger.info(f"📝 Criando nova conversa para anexo do contato {contact_id}")
+                        conversation_id = self._create_conversation_with_channel(contact_id, channel_id)
+                    else:
+                        conversation_id = conversation['id']
+                        logger.info(f"📝 Usando conversa existente {conversation_id} para anexo")
+                except Exception as conv_error:
+                    logger.error(f"❌ Erro ao obter conversa para anexo: {conv_error}")
+                
+                if not conversation_id:
+                    logger.error(f"❌ Não foi possível obter conversation_id para salvar anexo")
+                    return
+                
+                # ESPECIAL PARA ÁUDIO: Transcrever antes de processar
+                transcricao_audio = None
+                if message_type == 'audio' and media_id:
+                    logger.info(f"🎙️ Processando transcrição de áudio em _process_message_attachments...")
+                    try:
+                        from audio_transcription_service import audio_transcription_service
+                        from whatsapp_service import whatsapp_service
+                        
+                        # Obter URL do áudio primeiro
+                        media_info = whatsapp_service.get_media_url(media_id)
+                        if media_info and media_info.get('success'):
+                            audio_url = media_info['download_url']
+                            logger.info(f"✅ URL de áudio obtida: {audio_url[:50]}...")
+                            
+                            # Obter token de acesso para download autenticado
+                            access_token = whatsapp_service.get_access_token()
+                            
+                            # Transcrever áudio (com autenticação)
+                            transcription_result = audio_transcription_service.process_audio_message(audio_url, access_token)
+                            if transcription_result and transcription_result.get('success'):
+                                transcricao_audio = transcription_result['transcription']
+                                logger.info(f"🎉 Transcrição obtida: {transcricao_audio[:100]}...")
+                                
+                                # Salvar transcrição como mensagem de texto ANTES do anexo (limitando tamanho)
+                                # Limitar a 2000 caracteres para evitar erro de "Data too long"
+                                texto_limitado = transcricao_audio[:2000] if len(transcricao_audio) > 2000 else transcricao_audio
+                                if len(transcricao_audio) > 2000:
+                                    texto_limitado += "... [texto truncado]"
+                                    logger.warning(f"⚠️ Transcrição truncada: {len(transcricao_audio)} -> {len(texto_limitado)} caracteres")
+                                
+                                success = db_manager.insert_conversation_message(
+                                    conversation_id=conversation_id,
+                                    message_text=texto_limitado,
+                                    sender='user',
+                                    message_type='text',
+                                    timestamp=datetime.now(),
+                                    notify_websocket=True  # NOTIFICAR WEBSOCKET
+                                )
+                                if success:
+                                    logger.info(f"✅ Transcrição salva como mensagem de texto")
+                                else:
+                                    logger.error(f"❌ Falha ao salvar transcrição")
+                            else:
+                                logger.error(f"❌ Falha na transcrição: {transcription_result}")
+                        else:
+                            logger.error(f"❌ Falha ao obter URL do áudio: {media_info}")
+                    except Exception as transcription_error:
+                        logger.error(f"❌ Erro na transcrição: {transcription_error}")
+                        import traceback
+                        logger.error(f"Traceback: {traceback.format_exc()}")
+                
+                # 1. Salvar caption se existir (como mensagem de texto)
+                if message_text and message_text.strip():
+                    logger.info(f"💾 Salvando caption como mensagem de texto: {message_text[:50]}...")
+                    try:
+                        success = db_manager.insert_conversation_message(
+                            conversation_id=conversation_id,
+                            message_text=message_text,
+                            sender='user',
+                            message_type='text',  # Caption é sempre texto
+                            timestamp=datetime.now()
+                        )
+                        if success:
+                            logger.info(f"✅ Caption salvo como mensagem de texto")
+                        else:
+                            logger.error(f"❌ Falha ao salvar caption")
+                    except Exception as caption_error:
+                        logger.error(f"❌ Erro ao salvar caption: {caption_error}")
+                
+                # 2. Salvar anexo na tabela conversation_attach (EXCETO áudio - já foi transcrito)
+                if media_id and message_type != 'audio':
+                    logger.info(f"📎 ATTACHMENT-DEBUG: Iniciando salvamento de anexo ({message_type})")
+                    logger.info(f"💾 Obtendo URL de download para media_id={media_id}")
+                    
+                    # Preparar file_extension baseado no mime_type (apenas a extensão, não o mime_type completo)
+                    file_extension = None
+                    if media_type:
+                        if message_type == 'image':
+                            # Para imagens, extrair extensão do mime_type (ex: image/jpeg -> .jpeg)
+                            mime_base = media_type.split(';')[0].strip()  # Remove codecs
+                            file_extension = f".{mime_base.split('/')[-1]}" if '/' in mime_base else None
+                        elif message_type == 'document':
+                            # Para documentos, extrair extensão do mime_type ou usar o nome do arquivo
+                            if file_name and '.' in file_name:
+                                file_extension = '.' + file_name.split('.')[-1]
+                            else:
+                                mime_base = media_type.split(';')[0].strip()
+                                file_extension = f".{mime_base.split('/')[-1]}" if '/' in mime_base else None
+                    
+                    logger.info(f"📎 Dados do anexo - Tipo: {message_type}, Mime: {media_type}, Extensão: {file_extension}, Nome: {file_name}")
+                    
+                    # Obter URL de download real da API do WhatsApp (com timeout robusto)
+                    try:
+                        import signal
+                        
+                        def url_timeout_handler(signum, frame):
+                            raise TimeoutError("Timeout ao obter URL de mídia")
+                        
+                        # Timeout de 15 segundos para operação completa
+                        signal.signal(signal.SIGALRM, url_timeout_handler)
+                        signal.alarm(15)
+                        
+                        try:
+                            from whatsapp_service import whatsapp_service
+                            media_info = whatsapp_service.get_media_url(media_id)
+                            
+                            if media_info and media_info.get('success'):
+                                download_url = media_info['download_url']
+                                logger.info(f"✅ URL de download obtida: {download_url[:50]}...")
+                            else:
+                                logger.warning(f"⚠️ Falha ao obter URL, usando media_id como fallback")
+                                download_url = media_id  # Fallback para media_id
+                        finally:
+                            signal.alarm(0)  # Cancelar timeout
+                            
+                    except TimeoutError:
+                        logger.error(f"⏰ Timeout ao obter URL de mídia - usando media_id como fallback")
+                        download_url = media_id  # Fallback para media_id
+                    except Exception as url_error:
+                        logger.error(f"❌ Erro ao obter URL de mídia: {url_error}")
+                        download_url = media_id  # Fallback para media_id
+                    
+                    # Salvar anexo com URL real e file_extension
+                    logger.info(f"💾 Salvando anexo na conversation_attach: url={download_url[:50]}..., tipo={message_type}")
+                    for attach_attempt in range(3):
+                        try:
+                            success = db_manager.insert_conversation_attach(
+                                conversation_id=conversation_id,
+                                file_url=download_url,  # URL real de download
+                                file_type=message_type,
+                                file_name=file_name,
+                                file_extension=file_extension
+                            )
+                            if success:
+                                logger.info(f"✅ Anexo salvo na conversation_attach (tentativa {attach_attempt + 1})")
+                                break
+                            else:
+                                logger.warning(f"⚠️ Falha ao salvar anexo (tentativa {attach_attempt + 1})")
+                        except Exception as attach_error:
+                            logger.error(f"❌ Erro ao salvar anexo (tentativa {attach_attempt + 1}): {attach_error}")
+                        
+                        if attach_attempt == 2:  # Última tentativa falhou
+                            logger.error(f"❌ Falha definitiva ao salvar anexo após 3 tentativas")
+                elif media_id and message_type == 'audio':
+                    logger.info(f"🎙️ ATTACHMENT-DEBUG: Áudio processado com transcrição - anexo não salvo propositalmente")
+                else:
+                    logger.warning(f"📎 ATTACHMENT-DEBUG: ❌ media_id não encontrado para {message_type}")
+                    logger.warning(f"📎 ATTACHMENT-DEBUG: dados da mensagem: {message}")
+                
+        except Exception as e:
+            logger.error(f"❌ Erro ao processar anexos da mensagem: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+
+    
     def _extract_message_text(self, message):
         """Extrai o texto da mensagem baseado no tipo"""
         message_type = message.get('type', 'unknown')
         
         if message_type == 'text':
             return message.get('text', {}).get('body', '')
+        elif message_type == 'reaction':
+            # Reações não devem ser processadas - retornar identificador especial
+            emoji = message.get('reaction', {}).get('emoji', '👍')
+            return f'[Reação: {emoji}]'
         elif message_type == 'image':
+            # Extrair caption da imagem se existir
+            caption = message.get('image', {}).get('caption')
+            if caption and caption.strip():
+                return caption
             return '[Imagem enviada]'
         elif message_type == 'document':
+            # Extrair caption do documento se existir
+            caption = message.get('document', {}).get('caption')
+            if caption and caption.strip():
+                return caption
             return '[Documento enviado]'
         elif message_type == 'audio':
-            return '[Áudio enviado]'
+            # Para áudio, não retornar texto - a transcrição será salva separadamente
+            return ''
         elif message_type == 'video':
+            # Extrair caption do vídeo se existir
+            caption = message.get('video', {}).get('caption')
+            if caption and caption.strip():
+                return caption
             return '[Vídeo enviado]'
         else:
             return f'[Mensagem do tipo {message_type}]'
@@ -681,14 +961,21 @@ class WebhookWorker:
                 conversation_id = conversation['id']
                 logger.info(f"💬 Usando conversa existente: {conversation_id}")
             
-            # Salvar mensagem na conversa
-            success = db_manager.insert_conversation_message(
-                conversation_id=conversation_id,
-                message_text=message_text,
-                sender='user',
-                message_type=message.get('type', 'text'),
-                timestamp=datetime.now()
-            )
+            # Salvar mensagem na conversa (exceto áudio - que é processado separadamente com transcrição)
+            message_type = message.get('type', 'text')
+            if message_type != 'audio':
+                success = db_manager.insert_conversation_message(
+                    conversation_id=conversation_id,
+                    message_text=message_text,
+                    sender='user',
+                    message_type=message_type,
+                    timestamp=datetime.now(),
+                    notify_websocket=True  # NOTIFICAR WEBSOCKET
+                )
+            else:
+                # Para áudio, apenas log - transcrição será salva em _process_message_attachments
+                logger.info(f"🎙️ Mensagem de áudio não salva diretamente - aguardando transcrição")
+                success = True  # Considerar como sucesso para continuar o fluxo
             
             if success:
                 logger.info(f"✅ Mensagem salva na conversa {conversation_id}")
@@ -951,6 +1238,12 @@ class WebhookWorker:
         try:
             logger.info(f"🤖 Iniciando processamento ChatGPT para conversa {conversation_id}")
             
+            # Verificar se o atendimento está em modo humano
+            conversation = self._get_conversation_by_id(conversation_id)
+            if conversation and conversation.get('status_attendance') == 'human':
+                logger.info(f"🙋‍♂️ Conversa {conversation_id} está em modo humano - IA não vai responder")
+                return
+            
             # Buscar system_prompt da conversa (já formatado para ChatGPT)
             system_prompt_json = self._get_conversation_system_prompt(conversation_id)
             if not system_prompt_json:
@@ -990,8 +1283,37 @@ class WebhookWorker:
                     system_prompt_obj['content'] = system_prompt_content
                     logger.info(f"📝 Prompts dinâmicos aplicados: {len(dynamic_prompts)} caracteres")
                 
-                # Combinar funções da conversa + funções dos prompts dinâmicos
-                all_functions = bot_functions + prompt_functions
+                # NOVA FUNCIONALIDADE: Identificação de intenções e aplicação de prompts/funções específicas
+                logger.info(f"🚀 Iniciando identificação de intenção para conversation {conversation_id}")
+                
+                # Identificar intenção do usuário
+                identified_intent, clarification_question = self._identify_user_intent(
+                    contact['id'], conversation_id, system_prompt_content, channel['bot_id']
+                )
+                
+                intent_functions = []
+                if identified_intent:
+                    # Aplicar prompt e funções específicas da intenção
+                    intent_prompt, intent_functions = self._apply_intent_based_prompts_and_functions(
+                        identified_intent, channel['bot_id']
+                    )
+                    
+                    if intent_prompt:
+                        system_prompt_content = f"{system_prompt_content}\n\n{intent_prompt}"
+                        system_prompt_obj['content'] = system_prompt_content
+                        logger.info(f"🎯 Prompt específico da intenção aplicado: {len(intent_prompt)} caracteres")
+                
+                elif clarification_question:
+                    # Se precisar esclarecer a intenção, enviar pergunta diretamente
+                    logger.info(f"🤔 Pergunta de esclarecimento gerada: {clarification_question}")
+                    # Por enquanto, continua processamento normal. Futuramente pode implementar envio direto da pergunta
+                
+                else:
+                    # Nenhuma intenção identificada (confiança < 30% ou 'none')
+                    logger.info(f"🏃 Continuando sem aplicar intenções específicas - usando apenas prompts base e de eventos")
+                
+                # Combinar todas as funções: conversa + prompts dinâmicos + intenção
+                all_functions = bot_functions + prompt_functions + intent_functions
                 
                 # Reformatar dados para envio
                 final_system_prompt_content = system_prompt_content
@@ -1007,12 +1329,40 @@ class WebhookWorker:
                     system_prompt_content = f"{system_prompt_content}\n\n{dynamic_prompts}"
                     logger.info(f"📝 Prompts dinâmicos aplicados: {len(dynamic_prompts)} caracteres")
                 
+                # NOVA FUNCIONALIDADE: Identificação de intenções e aplicação de prompts/funções específicas
+                logger.info(f"🚀 Iniciando identificação de intenção para conversation {conversation_id}")
+                
+                # Identificar intenção do usuário
+                identified_intent, clarification_question = self._identify_user_intent(
+                    contact['id'], conversation_id, system_prompt_content, channel['bot_id']
+                )
+                
+                intent_functions = []
+                if identified_intent:
+                    # Aplicar prompt e funções específicas da intenção
+                    intent_prompt, intent_functions = self._apply_intent_based_prompts_and_functions(
+                        identified_intent, channel['bot_id']
+                    )
+                    
+                    if intent_prompt:
+                        system_prompt_content = f"{system_prompt_content}\n\n{intent_prompt}"
+                        logger.info(f"🎯 Prompt específico da intenção aplicado: {len(intent_prompt)} caracteres")
+                
+                elif clarification_question:
+                    # Se precisar esclarecer a intenção, enviar pergunta diretamente
+                    logger.info(f"🤔 Pergunta de esclarecimento gerada: {clarification_question}")
+                    # Por enquanto, continua processamento normal. Futuramente pode implementar envio direto da pergunta
+                
+                else:
+                    # Nenhuma intenção identificada (confiança < 30% ou 'none')
+                    logger.info(f"🏃 Continuando sem aplicar intenções específicas - usando apenas prompts base e de eventos")
+                
                 # Converter para formato JSON
                 system_prompt_obj = {
                     "role": "system", 
                     "content": system_prompt_content
                 }
-                all_functions = prompt_functions
+                all_functions = prompt_functions + intent_functions
                 final_system_prompt_content = system_prompt_content
             
             logger.info(f"🔧 Total de {len(all_functions)} funções preparadas para ChatGPT")
@@ -1050,6 +1400,11 @@ class WebhookWorker:
             conversation = self._get_conversation_by_id(conversation_id)
             if not conversation:
                 logger.error(f"❌ Conversa {conversation_id} não encontrada")
+                return
+            
+            # Verificar se o atendimento está em modo humano
+            if conversation.get('status_attendance') == 'human':
+                logger.info(f"🙋‍♂️ Conversa {conversation_id} está em modo humano - IA não vai responder")
                 return
             
             # Buscar system_prompt da conversa (já formatado para ChatGPT com functions)
@@ -1102,8 +1457,46 @@ class WebhookWorker:
                     system_prompt_obj['content'] = system_prompt_content
                     logger.info(f"📝 Prompts dinâmicos aplicados: {len(dynamic_prompts)} caracteres")
                 
-                # Combinar funções da conversa + funções dos prompts dinâmicos
-                all_functions = bot_functions + prompt_functions
+                # NOVA FUNCIONALIDADE: Identificação de intenções e aplicação de prompts/funções específicas
+                logger.info(f"🚀 INTENT-DEBUG: Iniciando identificação de intenção para conversation {conversation_id}")
+                logger.info(f"🚀 INTENT-DEBUG: Contact ID: {contact_id}, Bot ID: {channel['bot_id']}")
+                
+                intent_functions = []
+                try:
+                    # Identificar intenção do usuário
+                    logger.info(f"🔍 INTENT-DEBUG: Chamando _identify_user_intent...")
+                    identified_intent, clarification_question = self._identify_user_intent(
+                        contact_id, conversation_id, system_prompt_content, channel['bot_id']
+                    )
+                    logger.info(f"✅ INTENT-DEBUG: _identify_user_intent executado - Intent: {identified_intent}, Question: {clarification_question}")
+                    
+                    if identified_intent:
+                        # Aplicar prompt e funções específicas da intenção
+                        logger.info(f"🎯 INTENT-DEBUG: Aplicando intent {identified_intent}")
+                        intent_prompt, intent_functions = self._apply_intent_based_prompts_and_functions(
+                            identified_intent, channel['bot_id']
+                        )
+                        
+                        if intent_prompt:
+                            system_prompt_content = f"{system_prompt_content}\n\n{intent_prompt}"
+                            system_prompt_obj['content'] = system_prompt_content
+                            logger.info(f"🎯 Prompt específico da intenção aplicado: {len(intent_prompt)} caracteres")
+                    
+                    elif clarification_question:
+                        # Se precisar esclarecer a intenção, enviar pergunta diretamente
+                        logger.info(f"🤔 Pergunta de esclarecimento gerada: {clarification_question}")
+                        # Por enquanto, continua processamento normal. Futuramente pode implementar envio direto da pergunta
+                    
+                    else:
+                        # Nenhuma intenção identificada (confiança < 30% ou 'none')
+                        logger.info(f"🏃 Continuando sem aplicar intenções específicas - usando apenas prompts base e de eventos")
+                        
+                except Exception as e:
+                    logger.error(f"❌ INTENT-DEBUG: Erro ao identificar intenção: {e}")
+                    intent_functions = []
+                
+                # Combinar funções: conversa + prompts dinâmicos + intenção
+                all_functions = bot_functions + prompt_functions + intent_functions
                 
                 # Reformatar dados para envio
                 final_system_prompt_content = system_prompt_content
@@ -1280,11 +1673,11 @@ class WebhookWorker:
                 cursor.execute(query, (function_id, bot_id))
             else:
                 query = """
-                SELECT parameter_id, type, description, permited_values, default_value, format
-                FROM bots_functions_parameters
-                WHERE function_id = %s
-            """
-            cursor.execute(query, (function_id,))
+                    SELECT parameter_id, type, description, permited_values, default_value, format
+                    FROM bots_functions_parameters
+                    WHERE function_id = %s
+                """
+                cursor.execute(query, (function_id,))
             parameters = cursor.fetchall()
             cursor.close()
             return parameters
@@ -1362,6 +1755,7 @@ class WebhookWorker:
             
             # Buscar parâmetros da função
             parameters = self._get_function_parameters(function_id, bot_id)
+            logger.info(f"🔍 INTENT-DEBUG: Parâmetros encontrados para {function_id}: {parameters}")
             
             # Construir properties e required
             properties = {}
@@ -1416,11 +1810,324 @@ class WebhookWorker:
         
         return chatgpt_tools
     
+    def _get_intent_identification_function(self, bot_id):
+        """Cria a função para identificação de intenção do usuário"""
+        try:
+            # Buscar todas as intents ativas do bot
+            intents = db_manager.get_intents_by_bot(bot_id)
+            active_intents = [intent for intent in intents if intent.get('active', True)]
+            
+            if not active_intents:
+                logger.info(f"🤖 Bot {bot_id} não possui intents ativas - pulando identificação de intenção")
+                return None
+            
+            # Construir as opções de enum com ID e descrição
+            enum_options = []
+            descriptions = []
+            
+            for intent in active_intents:
+                intent_id = intent['id']
+                intention_desc = intent.get('intention', f"Intent {intent.get('name', 'Sem nome')}")
+                enum_options.append(intent_id)
+                descriptions.append(f"{intent_id} ({intention_desc})")
+            
+            # Adicionar opção 'none' para casos de baixa confiança
+            enum_options.append('none')
+            descriptions.append('none (nenhuma intenção corresponde adequadamente)')
+            
+            # Construir descrição da função
+            descriptions_text = ", ".join(descriptions)
+            function_description = f"A intenção identificada do usuário, as últimas mensagens é que mais representam a intenção. Escolha uma das seguintes opções: {descriptions_text}. REGRAS: Se tiver mais de 70% de certeza, retorne a intenção identificada. Se tiver entre 30% e 70% de certeza, retorne uma pergunta para esclarecer entre as 2 intenções mais prováveis. Se tiver menos de 30% de certeza (nenhuma intenção corresponde bem), retorne 'none' como identified_intent."
+            
+            # Construir função para ChatGPT
+            intent_function = {
+                "type": "function",
+                "function": {
+                    "name": "identify_user_intent",
+                    "description": function_description,
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "identified_intent": {
+                                "type": "string",
+                                "enum": enum_options,
+                                "description": "ID da intenção identificada do usuário"
+                            },
+                            "confidence": {
+                                "type": "number",
+                                "description": "Nível de confiança na identificação (0-100)"
+                            },
+                            "clarification_question": {
+                                "type": "string",
+                                "description": "Pergunta para esclarecer a intenção (usar apenas se confidence < 70)"
+                            }
+                        },
+                        "required": ["identified_intent", "confidence"]
+                    }
+                }
+            }
+            
+            logger.info(f"🎯 Função de identificação de intenção criada com {len(active_intents)} intents para bot {bot_id}")
+            return intent_function
+            
+        except Exception as e:
+            logger.error(f"❌ Erro ao criar função de identificação de intenção: {e}")
+            return None
+    
+    def _identify_user_intent(self, contact_id, conversation_id, system_prompt, bot_id):
+        """Identifica a intenção do usuário usando ChatGPT"""
+        try:
+            logger.info(f"🔍 Iniciando identificação de intenção para contact {contact_id}")
+            
+            # Criar função de identificação de intenção
+            intent_function = self._get_intent_identification_function(bot_id)
+            if not intent_function:
+                return None, None
+            
+            # Buscar contexto apenas da conversa ativa atual (não histórico geral do usuário)
+            conversation_context = self._get_conversation_context(conversation_id, limit=10)
+            newline_char = '\n'
+            logger.info(f"🔍 INTENT-DEBUG: Contexto da conversa {conversation_id}: {len(conversation_context.split(newline_char)) if conversation_context else 0} mensagens")
+            
+            # Criar prompt específico APENAS para identificação de intenção (independente do bot)
+            intent_identification_prompt = f"""Você é um identificador de intenções especializado. Sua única tarefa é analisar mensagens de conversas e identificar a intenção principal do usuário.
+
+Contexto da conversa ATIVA atual:
+{conversation_context}
+
+INSTRUÇÕES: 
+1. Identifique a intenção baseada exclusivamente nas mensagens mostradas acima
+2. Você DEVE chamar a função identify_user_intent para retornar a intenção identificada
+3. Se a intenção não estiver clara nas mensagens desta conversa, retorne 'none'
+"""
+            
+            # Preparar mensagens para ChatGPT
+            messages = [
+                {"role": "system", "content": intent_identification_prompt}
+            ]
+            
+            # Usar ChatGPTService mas evitando processamento da função identify_user_intent
+            from chatgpt_service import ChatGPTService
+            chatgpt_service = ChatGPTService()
+            
+            logger.info(f"🤖 Enviando para ChatGPT identificação de intenção...")
+            
+            # Criar um contact_id temporário para identificação de intent 
+            temp_contact_id = f"intent_identification_{contact_id}"
+            
+            try:
+                # Usar o contexto da conversa como user message para análise de intenção
+                user_message_for_intent = f"Analise esta conversa e identifique a intenção:\n\n{conversation_context}"
+                
+                response = chatgpt_service.generate_response_with_config(
+                    contact_id=temp_contact_id,  # Contact ID diferente para evitar processamento
+                    user_message=user_message_for_intent,
+                    system_prompt=intent_identification_prompt,
+                    chatgpt_functions=[intent_function]
+                )
+                
+                logger.info(f"🔍 INTENT-DEBUG: Resposta do ChatGPT Service: {str(response)[:200]}...")
+                
+                # Se a resposta contém dados da função, extrair
+                if isinstance(response, dict) and response.get('raw_data'):
+                    raw_data = response['raw_data']
+                    if isinstance(raw_data, dict):
+                        choices = raw_data.get('choices', [])
+                        if choices:
+                            message = choices[0].get('message', {})
+                            response = message  # Usar a mensagem como resposta
+                        else:
+                            logger.warning("❌ Nenhuma choice encontrada nos raw_data")
+                    
+            except Exception as api_error:
+                logger.error(f"❌ Erro ao chamar ChatGPT Service: {api_error}")
+                return None, None
+            
+            if not response:
+                logger.error("❌ ChatGPT não retornou resposta para identificação de intenção")
+                return None, None
+            
+            logger.info(f"🔍 INTENT-DEBUG: Resposta do ChatGPT: {str(response)[:200]}...")
+            
+            # Processar resposta - verificar tool_calls diretamente da API
+            function_call = None
+            
+            # Novo formato (tool_calls) - formato direto da OpenAI API
+            if response.get('tool_calls'):
+                tool_call = response['tool_calls'][0]
+                function_call = tool_call.get('function')
+                logger.info(f"🔧 INTENT-DEBUG: Usando tool_calls format direto da API")
+                logger.info(f"🔧 INTENT-DEBUG: Tool call completo: {str(tool_call)[:200]}...")
+            # Formato antigo (function_call)
+            elif response.get('function_call'):
+                function_call = response['function_call']
+                logger.info(f"🔧 INTENT-DEBUG: Usando function_call format")
+            
+            if function_call and function_call.get('name') == 'identify_user_intent':
+                try:
+                    import json
+                    arguments = json.loads(function_call['arguments'])
+                    intent_id = arguments.get('identified_intent')
+                    confidence = arguments.get('confidence', 0)
+                    clarification = arguments.get('clarification_question')
+                    
+                    logger.info(f"🎯 INTENT-DEBUG: Intent identificada com sucesso!")
+                    logger.info(f"🎯 INTENT-DEBUG: intent={intent_id}")
+                    logger.info(f"🎯 INTENT-DEBUG: confiança={confidence}%")
+                    
+                    if intent_id == 'none' or confidence < 30:
+                        logger.info(f"🚫 Confiança muito baixa ({confidence}%) ou nenhuma intenção corresponde - não aplicando nenhuma intenção")
+                        return None, None
+                    elif confidence >= 70 and intent_id and intent_id != 'none':
+                        logger.info(f"✅ Alta confiança ({confidence}%) - aplicando intenção {intent_id}")
+                        return intent_id, None
+                    else:
+                        logger.info(f"🤔 Confiança média ({confidence}%) - solicitando esclarecimento")
+                        return None, clarification
+                        
+                except json.JSONDecodeError as e:
+                    logger.error(f"❌ Erro ao decodificar argumentos da função: {e}")
+                    return None, None
+            else:
+                logger.warning(f"⚠️ ChatGPT não retornou uma function call válida para identificação de intenção")
+            
+                # Se não chamou função, verificar se há resposta de texto (pergunta de esclarecimento)
+                if response.get('content'):
+                    logger.info(f"🤔 ChatGPT retornou pergunta de esclarecimento: {response['content']}")
+                    return None, response['content']
+            
+            logger.warning("⚠️ ChatGPT não retornou identificação de intenção válida")
+            return None, None
+            
+        except Exception as e:
+            logger.error(f"❌ Erro na identificação de intenção: {e}")
+            import traceback
+            logger.error(f"❌ Traceback: {traceback.format_exc()}")
+            return None, None
+    
+    def _get_conversation_context(self, conversation_id, limit=10):
+        """Busca o contexto da conversa (últimas mensagens)"""
+        try:
+            if not db_manager.enabled:
+                return "Contexto não disponível"
+            
+            def _get_context_operation(connection):
+                cursor = connection.cursor(dictionary=True)
+                query = """
+                    SELECT message_text, sender, timestamp
+                    FROM conversation_message 
+                    WHERE conversation_id = %s 
+                    ORDER BY timestamp DESC 
+                    LIMIT %s
+                """
+                cursor.execute(query, (conversation_id, limit))
+                messages = cursor.fetchall()
+                cursor.close()
+                return messages
+            
+            messages = db_manager._execute_with_fresh_connection(_get_context_operation)
+            if not messages:
+                return "Nenhuma mensagem anterior encontrada"
+            
+            # Formatar contexto
+            context_lines = []
+            for msg in reversed(messages):  # Inverter para ordem cronológica
+                sender = "Usuário" if msg['sender'] == 'user' else "Assistente"
+                timestamp = msg['timestamp'].strftime("%H:%M") if msg['timestamp'] else ""
+                context_lines.append(f"[{timestamp}] {sender}: {msg['message_text']}")
+            
+            return "\n".join(context_lines)
+            
+        except Exception as e:
+            logger.error(f"❌ Erro ao buscar contexto da conversa: {e}")
+            return "Erro ao carregar contexto"
+    
+    def _apply_intent_based_prompts_and_functions(self, intent_id, bot_id):
+        """Aplica prompts e funções baseados na intenção identificada"""
+        try:
+            logger.info(f"🎯 Aplicando prompts e funções para intenção {intent_id}")
+            
+            # Buscar dados da intent
+            intent = db_manager.get_intent(intent_id, bot_id)
+            if not intent:
+                logger.error(f"❌ Intent {intent_id} não encontrada para bot {bot_id}")
+                return "", []
+            
+            # Extrair prompt da intent
+            intent_prompt = intent.get('prompt', '')
+            intent_functions = []
+            
+            # Se tem function_id, verificar para ajustar prompt
+            function_id = intent.get('function_id')
+            if function_id:
+                # Adicionar instrução obrigatória ao prompt
+                if intent_prompt:
+                    intent_prompt += f"\n\nIMPORTANTE: Quando identificar esta intenção, você DEVE obrigatoriamente chamar a função '{function_id}' imediatamente. Não apenas responda com texto - execute a função primeiro."
+                else:
+                    intent_prompt = f"IMPORTANTE: Quando identificar esta intenção, você DEVE obrigatoriamente chamar a função '{function_id}' imediatamente. Não apenas responda com texto - execute a função primeiro."
+            
+            # Se tem function_id, buscar e preparar a função
+            if function_id:
+                logger.info(f"🔧 Intent possui function_id: {function_id}")
+                
+                try:
+                    # Buscar função diretamente da tabela bots_functions (sem JOIN com prompts)
+                    def _get_intent_function_operation(connection):
+                        cursor = connection.cursor(dictionary=True)
+                        query = """
+                            SELECT function_id, description, action
+                            FROM bots_functions 
+                            WHERE bot_id = %s AND function_id = %s
+                        """
+                        cursor.execute(query, (bot_id, function_id))
+                        result = cursor.fetchone()
+                        cursor.close()
+                        return result
+                    
+                    matching_function = db_manager._execute_with_fresh_connection(_get_intent_function_operation)
+                    
+                    if matching_function:
+                        # Se encontrou função existente, usar ela
+                        intent_functions = self._build_chatgpt_functions_with_tools_format([matching_function], bot_id)
+                        logger.info(f"🔧 Função existente da intent preparada: {function_id}")
+                        logger.info(f"🔍 INTENT-DEBUG: Estrutura da função enviada: {intent_functions}")
+                        
+                        # Debug: verificar parâmetros específicos
+                        if intent_functions and len(intent_functions) > 0:
+                            func_params = intent_functions[0].get('function', {}).get('parameters', {})
+                            logger.info(f"🔍 INTENT-DEBUG: Parâmetros da função: {func_params}")
+                    else:
+                        # Se não encontrou, criar função customizada baseada no function_id
+                        function_data = [{
+                            'function_id': function_id,
+                            'description': f"OBRIGATÓRIO: Execute esta função imediatamente quando identificar a intenção '{intent.get('name', function_id)}'. Esta função deve ser chamada automaticamente sempre que o usuário demonstrar esta intenção.",
+                            'action': 'intent_specific'
+                        }]
+                        
+                        # Construir função no formato ChatGPT
+                        intent_functions = self._build_chatgpt_functions_with_tools_format(function_data, bot_id)
+                        logger.info(f"🔧 Função customizada da intent preparada: {function_id}")
+                    
+                except Exception as func_error:
+                    logger.error(f"❌ Erro ao preparar função da intent: {func_error}")
+            
+            logger.info(f"✅ Intent aplicada - Prompt: {len(intent_prompt)} chars, Funções: {len(intent_functions)}")
+            return intent_prompt, intent_functions
+            
+        except Exception as e:
+            logger.error(f"❌ Erro ao aplicar intent: {e}")
+            return "", []
+    
     def _process_message_received(self, event_data):
         """Processa mensagem individual recebida"""
         message_type = event_data.get('type', 'unknown')
         from_number = event_data.get('from')
         message_id = event_data.get('id')
+        
+        # FILTRO: Ignorar reações em todos os níveis de processamento
+        if message_type == 'reaction':
+            logger.info(f"🔇 Reação de {from_number} ignorada no _process_message_received - tipo 'reaction' não é processado")
+            return
         
         logger.info(f"💬 Processando mensagem {message_type} de {from_number} (ID: {message_id})")
         
@@ -1545,8 +2252,14 @@ class WebhookWorker:
                 logger.info(f"📊 ETAPA 3 - Verificando se mensagem é mais nova: diff={diff_task:.2f}s")
                 
                 if diff_task > 0:
-                    logger.info(f"⏭️ Mensagem mais nova detectada (+{diff_task:.1f}s), cancelando tarefa")
-                    return
+                    # Se a diferença é muito pequena (< 15s), processar imediatamente  
+                    # Isso permite processar quando o usuário para de enviar mensagens por mais de 10s
+                    if diff_task < 15:
+                        logger.info(f"🚀 Mensagem nova detectada (+{diff_task:.1f}s), mas < 15s - processando imediatamente")
+                        # Continuar com o processamento
+                    else:
+                        logger.info(f"⏭️ Mensagem mais nova detectada (+{diff_task:.1f}s), cancelando tarefa")
+                        return
                 else:
                     logger.info(f"✅ Mensagem anterior à tarefa (-{abs(diff_task):.1f}s), continuando processamento")
             else:
@@ -1788,7 +2501,8 @@ class WebhookWorker:
                                     message_type='text',
                                     timestamp=datetime.now(),
                                     prompt=prompt_json,
-                                    tokens=tokens_used
+                                    tokens=tokens_used,
+                                    notify_websocket=True  # NOTIFICAR WEBSOCKET
                                 )
                                 
                                 logger.info(f"💾 Salvando resposta: tokens={tokens_used}, prompt_size={len(prompt_json) if prompt_json else 0} chars")
@@ -1911,7 +2625,11 @@ class WebhookWorker:
                     if function_executed:
                         logger.info(f"⚠️ Function foi executada - mensagem já enviada pela function, não enviando duplicata")
                         # Apenas salvar na conversa se não foi salva pela function
-                        if response_text and not any(keyword in response_text.lower() for keyword in ['ticket', 'incluído', 'atendimento finalizado']):
+                        # Não salvar se é função encerrar_conversa (já salva ela mesma) ou outras funções que já salvam
+                        skip_save_keywords = ['ticket', 'incluído', 'atendimento finalizado', 'conversa encerrada', 'obrigado pelo contato']
+                        should_skip_save = any(keyword in response_text.lower() for keyword in skip_save_keywords) if response_text else False
+                        
+                        if response_text and not should_skip_save:
                             # Salvar resposta na conversa apenas se não for mensagem de ticket (já salva pela function)
                             conversation_saved = False
                             for save_attempt in range(3):
@@ -1926,7 +2644,8 @@ class WebhookWorker:
                                             message_text=response_text,
                                             sender='agent',
                                             message_type='text',
-                                            timestamp=datetime.now()
+                                            timestamp=datetime.now(),
+                                            notify_websocket=True  # NOTIFICAR WEBSOCKET
                                         )
                                         if success:
                                             conversation_saved = True
@@ -1963,7 +2682,8 @@ class WebhookWorker:
                                         message_text=response_text,
                                         sender='agent',
                                         message_type='text',
-                                        timestamp=datetime.now()
+                                        timestamp=datetime.now(),
+                                        notify_websocket=True  # NOTIFICAR WEBSOCKET
                                     )
                                     if success:
                                         conversation_saved = True
@@ -1998,13 +2718,8 @@ class WebhookWorker:
                                 except Exception as e:
                                     logger.warning(f"⚠️ Erro ao buscar agent_name do bot: {e}")
                                 
-                                # Enviar com prefixo via WhatsApp (se agent_name configurado)
-                                if agent_name:
-                                    chatgpt_message_with_prefix = f"*{agent_name}:*\n{response_text}"
-                                else:
-                                    # Se não tiver agent_name configurado, enviar sem prefixo
-                                    chatgpt_message_with_prefix = response_text
-                                sent = whatsapp_service.process_outgoing_message(contact_id, chatgpt_message_with_prefix)
+                                # Enviar mensagem via WhatsApp (o prefixo será adicionado pelo whatsapp_service)
+                                sent = whatsapp_service.process_outgoing_message(contact_id, response_text, agent_name)
                                 if sent:
                                     logger.info(f"📤 Resposta enviada com sucesso para {contact_id}")
                                     send_success = True
@@ -2036,10 +2751,24 @@ class WebhookWorker:
                 else:
                     # Última tentativa - enviar mensagem de erro
                     try:
+                        # Buscar agent_name do bot (se disponível) para mensagem de erro
+                        agent_name = None
+                        try:
+                            conversation = db_manager.get_active_conversation(contact_id)
+                            if conversation and conversation.get('channel_id'):
+                                channel = db_manager.get_channel(conversation['channel_id'])
+                                if channel and channel.get('bot_id'):
+                                    bot_data = self._get_bot_data(channel['bot_id'])
+                                    if bot_data and bot_data.get('agent_name'):
+                                        agent_name = bot_data['agent_name']
+                        except Exception as e:
+                            logger.warning(f"⚠️ Erro ao buscar agent_name para mensagem de erro: {e}")
+                        
                         from whatsapp_service import whatsapp_service
                         whatsapp_service.process_outgoing_message(
                             contact_id, 
-                            "Desculpe, estou com dificuldades técnicas no momento. Tente novamente em alguns minutos."
+                            "Desculpe, estou com dificuldades técnicas no momento. Tente novamente em alguns minutos.",
+                            agent_name
                         )
                         logger.info(f"📤 Mensagem de erro enviada para {contact_id}")
                     except Exception as fallback_error:
@@ -2069,6 +2798,138 @@ class WebhookWorker:
         # - Alertas para administradores
         # - Retry automático
         # - Análise de erros
+    
+    def _schedule_conversation_timeout(self, contact_id):
+        """Agenda timeout de 1 hora para conversas inativas (cancela timeout anterior)"""
+        try:
+            # Verificar se já existe conversa ativa para este contato
+            conversation = db_manager.get_active_conversation(contact_id)
+            if not conversation:
+                # Não há conversa ativa, não precisa agendar timeout
+                return
+            
+            conversation_id = conversation['id']
+            current_time = time.time()
+            
+            # IMPORTANTE: Marcar o timeout com um identificador único por conversa
+            # Isso permite que timeouts antigos sejam ignorados quando processados
+            timeout_id = f"timeout_{conversation_id}_{int(current_time)}"
+            
+            # Criar tarefa de timeout para 1 hora (3600 segundos)
+            timeout_task = {
+                'task_type': 'conversation_timeout',
+                'timeout_id': timeout_id,  # Identificador único
+                'contact_id': contact_id,
+                'conversation_id': conversation_id,
+                'created_at': current_time,
+                'timeout_reason': 'user_inactivity',
+                'timeout_duration': 3600  # 1 hora em segundos
+            }
+            
+            # Salvar o timeout_id na memória para referência
+            if not hasattr(self, 'active_timeouts'):
+                self.active_timeouts = {}
+            self.active_timeouts[conversation_id] = timeout_id
+            
+            # Enviar para fila de delay com 1 hora
+            from rabbitmq_manager import rabbitmq_manager
+            success = rabbitmq_manager.publish_with_delay(timeout_task, delay_seconds=3600)
+            
+            if success:
+                logger.info(f"⏰ Timeout de 1h agendado para conversa {conversation_id} (ID: {timeout_id})")
+            else:
+                logger.error(f"❌ Falha ao agendar timeout para conversa {conversation_id}")
+                
+        except Exception as e:
+            logger.error(f"❌ Erro ao agendar timeout de conversa: {e}")
+    
+    def _process_conversation_timeout(self, event_data):
+        """Processa timeout de conversa (1h sem resposta do usuário)"""
+        try:
+            contact_id = event_data.get('contact_id')
+            conversation_id = event_data.get('conversation_id')
+            timeout_id = event_data.get('timeout_id')
+            timeout_duration = event_data.get('timeout_duration', 3600)
+            
+            # VERIFICAR SE É O TIMEOUT MAIS RECENTE (evita processar timeouts antigos)
+            if timeout_id and hasattr(self, 'active_timeouts'):
+                current_timeout = self.active_timeouts.get(conversation_id)
+                if current_timeout and current_timeout != timeout_id:
+                    logger.info(f"⏭️ Timeout antigo ignorado para conversa {conversation_id} (ID: {timeout_id})")
+                    return
+            
+            logger.info(f"⏰ Processando timeout de conversa {conversation_id} (contato {contact_id}, ID: {timeout_id})")
+            
+            # Verificar se a conversa ainda está ativa
+            conversation = db_manager.get_conversation_by_id(conversation_id)
+            if not conversation:
+                logger.info(f"❌ Conversa {conversation_id} não encontrada - timeout cancelado")
+                return
+            
+            if conversation.get('status') != 'active':
+                logger.info(f"❌ Conversa {conversation_id} não está mais ativa - timeout cancelado")
+                return
+            
+            # Verificar se houve mensagens recentes do usuário (cancelar timeout se sim)
+            try:
+                latest_messages = db_manager.get_last_user_messages(conversation_id, limit=1)
+                if latest_messages:
+                    last_message = latest_messages[0]
+                    last_message_time = last_message.get('timestamp')
+                    
+                    if last_message_time:
+                        # Converter para timestamp se necessário
+                        if hasattr(last_message_time, 'timestamp'):
+                            last_timestamp = last_message_time.timestamp()
+                        else:
+                            last_timestamp = last_message_time
+                        
+                        # Verificar se a última mensagem foi há menos de 1 hora
+                        current_time = time.time()
+                        time_diff = current_time - last_timestamp
+                        
+                        if time_diff < (timeout_duration - 60):  # Margem de 1 minuto
+                            logger.info(f"❌ Timeout cancelado - usuário enviou mensagem há {time_diff/60:.1f} min")
+                            return
+            except Exception as e:
+                logger.warning(f"⚠️ Erro ao verificar mensagens recentes: {e}")
+            
+            # Limpar timeout da memória
+            if hasattr(self, 'active_timeouts') and conversation_id in self.active_timeouts:
+                del self.active_timeouts[conversation_id]
+                logger.info(f"🧹 Timeout limpo da memória para conversa {conversation_id}")
+            
+            # Salvar mensagem de timeout (SEM enviar para usuário)
+            timeout_message = f"Se passaram {timeout_duration//60} minutos sem resposta do usuário. Fica entendido que usuário não tem mais nada a acrescentar."
+            
+            from datetime import datetime
+            message_id = db_manager.insert_conversation_message(
+                conversation_id=conversation_id,
+                message_text=timeout_message,
+                sender='system',  # Mensagem do sistema
+                message_type='text',
+                timestamp=datetime.now(),
+                notify_websocket=False  # Não notificar WebSocket (mensagem interna)
+            )
+            
+            if message_id:
+                logger.info(f"💾 Mensagem de timeout salva: ID {message_id}")
+            else:
+                logger.error(f"❌ Falha ao salvar mensagem de timeout")
+                return
+            
+            # Enviar contexto atualizado para IA dar seguimento
+            logger.info(f"🤖 Enviando contexto para IA dar seguimento à conversa {conversation_id}")
+            try:
+                self._process_chatgpt_with_conversation_config(contact_id, conversation_id)
+                logger.info(f"✅ IA processou timeout com sucesso para conversa {conversation_id}")
+            except Exception as ai_error:
+                logger.error(f"❌ Erro ao processar timeout com IA: {ai_error}")
+                
+        except Exception as e:
+            logger.error(f"❌ Erro ao processar timeout de conversa: {e}")
+            import traceback
+            logger.error(f"❌ Traceback: {traceback.format_exc()}")
     
     def start_consuming(self, queue_name):
         """Inicia o consumo de uma fila específica"""

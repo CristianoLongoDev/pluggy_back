@@ -7,7 +7,6 @@ import { Label } from '@/components/ui/label';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { MessageSquare, LogIn, UserPlus } from 'lucide-react';
 
 const Auth: React.FC = () => {
@@ -25,7 +24,7 @@ const Auth: React.FC = () => {
   const [signupEmail, setSignupEmail] = useState('');
   const [signupPassword, setSignupPassword] = useState('');
   const [fullName, setFullName] = useState('');
-  const [role, setRole] = useState('agent');
+  const [companyName, setCompanyName] = useState('');
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -61,7 +60,7 @@ const Auth: React.FC = () => {
       return;
     }
 
-    const { error } = await signUp(signupEmail, signupPassword, fullName, role);
+    const { error } = await signUp(signupEmail, signupPassword, fullName, companyName);
 
     if (error) {
       if (error.message.includes('User already registered')) {
@@ -76,7 +75,7 @@ const Auth: React.FC = () => {
       setSignupEmail('');
       setSignupPassword('');
       setFullName('');
-      setRole('agent');
+      setCompanyName('');
     }
 
     setLoading(false);
@@ -193,16 +192,15 @@ const Auth: React.FC = () => {
                 </div>
 
                 <div className="space-y-2">
-                  <Label htmlFor="role">Função</Label>
-                  <Select value={role} onValueChange={setRole}>
-                    <SelectTrigger>
-                      <SelectValue placeholder="Selecione a função" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="agent">Agente</SelectItem>
-                      <SelectItem value="admin">Administrador</SelectItem>
-                    </SelectContent>
-                  </Select>
+                  <Label htmlFor="company-name">Nome da Empresa</Label>
+                  <Input
+                    id="company-name"
+                    type="text"
+                    placeholder="Nome da sua empresa"
+                    value={companyName}
+                    onChange={(e) => setCompanyName(e.target.value)}
+                    required
+                  />
                 </div>
 
                 <Button type="submit" className="w-full" disabled={loading}>

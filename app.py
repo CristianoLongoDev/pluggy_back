@@ -495,6 +495,347 @@ def get_conversation_messages(conversation_id):
             "status": "error"
         }), 500
 
+@app.route('/conversations/<conversation_id>/status', methods=['PUT'])
+@jwt_required
+def update_conversation_status(conversation_id):
+    """
+    Atualiza o status_attendance de uma conversa (bot/human)
+    """
+    try:
+        # Verificar se o banco está habilitado
+        if not db_manager.enabled:
+            return jsonify({
+                "error": "Banco de dados não está habilitado",
+                "status": "error"
+            }), 503
+        
+        # Obter account_id do token JWT
+        account_id = get_account_id_from_token()
+        if not account_id:
+            return jsonify({
+                "error": "Token JWT não contém account_id válido",
+                "status": "error"
+            }), 400
+        
+        # Validar formato do ID da conversa (deve ser um número inteiro)
+        try:
+            conversation_id = int(conversation_id)
+        except ValueError:
+            return jsonify({
+                "error": "conversation_id deve ser um número inteiro válido",
+                "status": "error"
+            }), 400
+        
+        # Obter dados do request
+        data = request.get_json()
+        if not data:
+            return jsonify({
+                "error": "Dados JSON são obrigatórios",
+                "status": "error"
+            }), 400
+        
+        # Validar status_attendance
+        status_attendance = data.get('status_attendance')
+        if not status_attendance:
+            return jsonify({
+                "error": "Campo 'status_attendance' é obrigatório",
+                "status": "error"
+            }), 400
+        
+        if status_attendance not in ['bot', 'human']:
+            return jsonify({
+                "error": "status_attendance deve ser 'bot' ou 'human'",
+                "status": "error"
+            }), 400
+        
+        # Verificar se a conversa existe e pertence à conta
+        conversation = db_manager.get_conversation_by_id(conversation_id)
+        if not conversation:
+            return jsonify({
+                "error": "Conversa não encontrada",
+                "status": "error"
+            }), 404
+        
+        # Verificar se a conversa pertence à conta do usuário
+        contact = db_manager.get_contact_by_id(conversation['contact_id'])
+        if not contact or contact['account_id'] != account_id:
+            return jsonify({
+                "error": "Acesso negado - conversa não pertence à sua conta",
+                "status": "error"
+            }), 403
+        
+        # Atualizar status_attendance
+        success = db_manager.update_conversation_status_attendance(conversation_id, status_attendance)
+        if not success:
+            return jsonify({
+                "error": "Falha ao atualizar status da conversa",
+                "status": "error"
+            }), 500
+        
+        # Buscar conversa atualizada
+        updated_conversation = db_manager.get_conversation_by_id(conversation_id)
+        
+        return jsonify({
+            "conversation": {
+                "id": updated_conversation['id'],
+                "status": updated_conversation['status'],
+                "status_attendance": updated_conversation['status_attendance'],
+                "started_at": updated_conversation['started_at'].isoformat() if updated_conversation['started_at'] else None,
+                "ended_at": updated_conversation['ended_at'].isoformat() if updated_conversation['ended_at'] else None
+            },
+            "message": f"Status alterado para {status_attendance} com sucesso",
+            "status": "success"
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"❌ Erro no endpoint update_conversation_status: {e}")
+        return jsonify({
+            "error": f"Erro interno do servidor: {str(e)}",
+            "status": "error"
+        }), 500
+
+@app.route('/conversations/<conversation_id>/send-message', methods=['POST'])
+@jwt_required
+def send_message_to_conversation(conversation_id):
+    """Envia mensagem de agente humano para uma conversa e para o canal (WhatsApp)"""
+    try:
+        # Validar conversation_id como int
+        try:
+            conversation_id = int(conversation_id)
+        except (ValueError, TypeError):
+            return jsonify({
+                "success": False,
+                "error": "conversation_id deve ser um número inteiro"
+            }), 400
+        
+        # Extrair payload
+        data = request.get_json()
+        if not data:
+            return jsonify({
+                "success": False,
+                "error": "Body JSON é obrigatório"
+            }), 400
+        
+        message_content = data.get('content', '').strip()
+        user_id = data.get('user_id')  # ID do usuário que está enviando
+        
+        if not message_content:
+            return jsonify({
+                "success": False,
+                "error": "Campo 'content' é obrigatório e não pode estar vazio"
+            }), 400
+        
+        # Buscar account_id do token JWT
+        account_id = get_account_id_from_token()
+        if not account_id:
+            return jsonify({
+                "success": False,
+                "error": "account_id não encontrado no token"
+            }), 401
+        
+        # Verificar se a conversa existe e pertence ao account
+        conversation = db_manager.get_conversation_by_id(conversation_id)
+        if not conversation:
+            return jsonify({
+                "success": False,
+                "error": "Conversa não encontrada"
+            }), 404
+        
+        # Verificar propriedade da conversa
+        contact = db_manager.get_contact_by_id(conversation['contact_id'])
+        if not contact or contact['account_id'] != account_id:
+            return jsonify({
+                "success": False,
+                "error": "Conversa não pertence ao account do usuário"
+            }), 403
+        
+        # Salvar mensagem no banco primeiro
+        message_id = db_manager.insert_conversation_message(
+            conversation_id=conversation_id,
+            message_text=message_content,
+            sender='agent',  # Mensagem de agente humano
+            message_type='text',
+            timestamp=datetime.now(),
+            user_id=user_id,
+            notify_websocket=True  # Notificar outros clientes WebSocket
+        )
+        
+        if not message_id:
+            return jsonify({
+                "success": False,
+                "error": "Falha ao salvar mensagem no banco de dados"
+            }), 500
+        
+        # Buscar informações do bot para agent_name (para prefixo)
+        agent_name = None
+        try:
+            if conversation.get('channel_id'):
+                channel = db_manager.get_channel(conversation['channel_id'])
+                if channel and channel.get('bot_id'):
+                    bot = db_manager.get_bot(channel['bot_id'])
+                    if bot and bot.get('agent_name'):
+                        agent_name = bot['agent_name']
+        except Exception as e:
+            logger.warning(f"⚠️ Erro ao buscar agent_name: {e}")
+        
+        # Enviar mensagem para o canal (WhatsApp)
+        send_success = False
+        try:
+            from whatsapp_service import whatsapp_service
+            
+            # Usar o telefone do contato para envio
+            contact_phone = contact.get('whatsapp_phone_number')
+            if not contact_phone:
+                logger.error(f"❌ Contato {contact['id']} não tem número do WhatsApp")
+                return jsonify({
+                    "success": False,
+                    "error": "Contato não tem número do WhatsApp configurado"
+                }), 400
+            
+            # Enviar via WhatsApp (o prefixo será adicionado automaticamente)
+            result = whatsapp_service.process_outgoing_message(contact_phone, message_content, agent_name)
+            if result:
+                send_success = True
+                logger.info(f"✅ Mensagem enviada via WhatsApp para {contact_phone}")
+            else:
+                logger.error(f"❌ Falha ao enviar mensagem via WhatsApp para {contact_phone}")
+        
+        except Exception as whatsapp_error:
+            logger.error(f"❌ Erro ao enviar mensagem WhatsApp: {whatsapp_error}")
+        
+        # Retornar resposta
+        if send_success:
+            return jsonify({
+                "success": True,
+                "message": "Mensagem enviada com sucesso",
+                "data": {
+                    "message_id": message_id,
+                    "conversation_id": conversation_id,
+                    "sent_to_channel": True,
+                    "channel_type": "whatsapp"
+                },
+                "status": "success"
+            }), 200
+        else:
+            # Mensagem foi salva mas não enviada para o canal
+            return jsonify({
+                "success": False,
+                "error": "Mensagem salva no banco mas falha ao enviar para WhatsApp",
+                "data": {
+                    "message_id": message_id,
+                    "conversation_id": conversation_id,
+                    "sent_to_channel": False
+                },
+                "status": "error"
+            }), 500
+    
+    except Exception as e:
+        logger.error(f"❌ Erro ao enviar mensagem para conversa {conversation_id}: {e}")
+        import traceback
+        logger.error(f"❌ Traceback: {traceback.format_exc()}")
+        return jsonify({
+            "success": False,
+            "error": "Erro interno do servidor",
+            "status": "error"
+        }), 500
+
+@app.route('/conversations/<conversation_id>/close', methods=['PUT'])
+@jwt_required
+def close_conversation(conversation_id):
+    """Encerra uma conversa definindo status = 'closed' e ended_at"""
+    try:
+        # Validar conversation_id como int
+        try:
+            conversation_id = int(conversation_id)
+        except (ValueError, TypeError):
+            return jsonify({
+                "success": False,
+                "error": "conversation_id deve ser um número inteiro"
+            }), 400
+        
+        # Extrair payload (opcional)
+        data = request.get_json() or {}
+        user_id = data.get('user_id')  # ID do usuário que está encerrando (para logs)
+        
+        # Buscar account_id do token JWT
+        account_id = get_account_id_from_token()
+        if not account_id:
+            return jsonify({
+                "success": False,
+                "error": "account_id não encontrado no token"
+            }), 401
+        
+        # Verificar se a conversa existe e pertence ao account
+        conversation = db_manager.get_conversation_by_id(conversation_id)
+        if not conversation:
+            return jsonify({
+                "success": False,
+                "error": "Conversa não encontrada"
+            }), 404
+        
+        # Verificar se a conversa já está encerrada
+        if conversation.get('status') == 'closed':
+            return jsonify({
+                "success": True,
+                "message": "Conversa já está encerrada",
+                "data": {
+                    "conversation_id": conversation_id,
+                    "status": "closed",
+                    "already_closed": True,
+                    "ended_at": conversation.get('ended_at').isoformat() if conversation.get('ended_at') else None
+                },
+                "status": "success"
+            }), 200
+        
+        # Verificar propriedade da conversa
+        contact = db_manager.get_contact_by_id(conversation['contact_id'])
+        if not contact or contact['account_id'] != account_id:
+            return jsonify({
+                "success": False,
+                "error": "Conversa não pertence ao account do usuário"
+            }), 403
+        
+        # Apenas encerrar a conversa - não salvar mensagem
+        
+        # Encerrar a conversa (status = closed, ended_at = NOW)
+        close_success = db_manager.close_conversation(conversation_id)
+        
+        if not close_success:
+            return jsonify({
+                "success": False,
+                "error": "Falha ao encerrar conversa no banco de dados"
+            }), 500
+        
+        # Buscar conversa atualizada para retornar
+        updated_conversation = db_manager.get_conversation_by_id(conversation_id)
+        
+        # Log de auditoria
+        user_email = request.current_user.get('email', 'unknown')
+        logger.info(f"🔚 CONVERSA ENCERRADA - ID: {conversation_id}, User: {user_email}, User ID: {user_id or 'N/A'}")
+        
+        # Retornar sucesso
+        return jsonify({
+            "success": True,
+            "message": "Conversa encerrada com sucesso",
+            "data": {
+                "conversation_id": conversation_id,
+                "status": "closed",
+                "ended_at": updated_conversation.get('ended_at').isoformat() if updated_conversation.get('ended_at') else None,
+                "closed_by_user_id": user_id
+            },
+            "status": "success"
+        }), 200
+    
+    except Exception as e:
+        logger.error(f"❌ Erro ao encerrar conversa {conversation_id}: {e}")
+        import traceback
+        logger.error(f"❌ Traceback: {traceback.format_exc()}")
+        return jsonify({
+            "success": False,
+            "error": "Erro interno do servidor",
+            "status": "error"
+        }), 500
+
 # ==================== CHANNELS ENDPOINTS ====================
 
 @app.route('/channels', methods=['GET'])
@@ -5613,6 +5954,535 @@ def debug_database_enable():
     except Exception as e:
         return jsonify({
             "error": f"Enable failed: {str(e)}",
+            "status": "error"
+        }), 500
+
+
+
+# ==================== INTENTS ENDPOINTS ====================
+
+@app.route('/bots/<bot_id>/intents', methods=['GET'])
+@jwt_required
+def get_bot_intents(bot_id):
+    """
+    Lista todas as intents de um bot específico
+    """
+    try:
+        # Verificar se o banco está habilitado
+        if not db_manager.enabled:
+            return jsonify({
+                "error": "Banco de dados não está habilitado",
+                "status": "error"
+            }), 503
+        
+        # Obter account_id do token JWT
+        account_id = get_account_id_from_token()
+        if not account_id:
+            return jsonify({
+                "error": "Token JWT não contém account_id válido",
+                "status": "error"
+            }), 400
+        
+        # Validar formato do UUID do bot
+        try:
+            uuid.UUID(bot_id)
+        except ValueError:
+            return jsonify({
+                "error": "Bot ID deve ser um UUID válido",
+                "status": "error"
+            }), 400
+        
+        # Verificar se o bot existe e pertence à conta do usuário
+        bot = db_manager.get_bot(bot_id)
+        if not bot:
+            return jsonify({
+                "error": "Bot não encontrado",
+                "status": "error"
+            }), 404
+        
+        if bot['account_id'] != account_id:
+            return jsonify({
+                "error": "Acesso negado - bot não pertence à sua conta",
+                "status": "error"
+            }), 403
+        
+        # Buscar intents do bot
+        intents = db_manager.get_intents_by_bot(bot_id)
+        
+        logger.info(f"✅ Usuário {request.current_user.get('sub')} listou {len(intents)} intents do bot {bot_id}")
+        
+        return jsonify({
+            "status": "success",
+            "intents": intents,
+            "total": len(intents),
+            "bot_id": bot_id
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"❌ Erro no endpoint get_bot_intents: {e}")
+        return jsonify({
+            "error": f"Erro interno do servidor: {str(e)}",
+            "status": "error"
+        }), 500
+
+@app.route('/bots/<bot_id>/intents', methods=['POST'])
+@jwt_required
+def create_intent(bot_id):
+    """
+    Cria uma nova intent para um bot
+    """
+    try:
+        # Verificar se o banco está habilitado
+        if not db_manager.enabled:
+            return jsonify({
+                "error": "Banco de dados não está habilitado",
+                "status": "error"
+            }), 503
+        
+        # Obter account_id do token JWT
+        account_id = get_account_id_from_token()
+        if not account_id:
+            return jsonify({
+                "error": "Token JWT não contém account_id válido",
+                "status": "error"
+            }), 400
+        
+        # Validar formato do UUID do bot
+        try:
+            uuid.UUID(bot_id)
+        except ValueError:
+            return jsonify({
+                "error": "Bot ID deve ser um UUID válido",
+                "status": "error"
+            }), 400
+        
+        # Verificar se o bot existe e pertence à conta do usuário
+        bot = db_manager.get_bot(bot_id)
+        if not bot:
+            return jsonify({
+                "error": "Bot não encontrado",
+                "status": "error"
+            }), 404
+        
+        if bot['account_id'] != account_id:
+            return jsonify({
+                "error": "Acesso negado - bot não pertence à sua conta",
+                "status": "error"
+            }), 403
+        
+        # Obter dados da requisição
+        data = request.get_json()
+        if not data:
+            return jsonify({
+                "error": "Dados JSON são obrigatórios",
+                "status": "error"
+            }), 400
+        
+        # Validar campos obrigatórios
+        intent_id = data.get('id')
+        if not intent_id:
+            return jsonify({
+                "error": "Campo 'id' é obrigatório",
+                "status": "error"
+            }), 400
+        
+        # Validar formato do UUID
+        try:
+            uuid.UUID(intent_id)
+        except ValueError:
+            return jsonify({
+                "error": "Campo 'id' deve ser um UUID válido",
+                "status": "error"
+            }), 400
+        
+        # Validar campos opcionais
+        name = data.get('name')
+        if name is not None and len(name) > 50:
+            return jsonify({
+                "error": "Campo 'name' deve ter no máximo 50 caracteres",
+                "status": "error"
+            }), 400
+        
+        intention = data.get('intention')
+        active = data.get('active', True)
+        prompt = data.get('prompt')
+        function_id = data.get('function_id')
+        
+        # Validar function_id se fornecido
+        if function_id is not None and len(function_id) > 150:
+            return jsonify({
+                "error": "Campo 'function_id' deve ter no máximo 150 caracteres",
+                "status": "error"
+            }), 400
+        
+        # Verificar se a intent já existe
+        existing_intent = db_manager.get_intent(intent_id, bot_id)
+        if existing_intent:
+            return jsonify({
+                "error": "Intent com este ID já existe para este bot",
+                "status": "error"
+            }), 409
+        
+        # Inserir intent
+        success = db_manager.insert_intent(
+            intent_id=intent_id,
+            bot_id=bot_id,
+            name=name,
+            intention=intention,
+            active=active,
+            prompt=prompt,
+            function_id=function_id
+        )
+        
+        if not success:
+            return jsonify({
+                "error": "Falha ao criar intent",
+                "status": "error"
+            }), 500
+        
+        # Buscar a intent criada para retornar
+        created_intent = db_manager.get_intent(intent_id, bot_id)
+        
+        logger.info(f"✅ Usuário {request.current_user.get('sub')} criou intent {intent_id} para bot {bot_id}")
+        
+        return jsonify({
+            "message": "Intent criada com sucesso",
+            "status": "success",
+            "intent": created_intent
+        }), 201
+        
+    except Exception as e:
+        logger.error(f"❌ Erro no endpoint create_intent: {e}")
+        return jsonify({
+            "error": f"Erro interno do servidor: {str(e)}",
+            "status": "error"
+        }), 500
+
+@app.route('/bots/<bot_id>/intents/<intent_id>', methods=['GET'])
+@jwt_required
+def get_intent_by_id(bot_id, intent_id):
+    """
+    Busca uma intent específica pelo ID
+    """
+    try:
+        # Verificar se o banco está habilitado
+        if not db_manager.enabled:
+            return jsonify({
+                "error": "Banco de dados não está habilitado",
+                "status": "error"
+            }), 503
+        
+        # Obter account_id do token JWT
+        account_id = get_account_id_from_token()
+        if not account_id:
+            return jsonify({
+                "error": "Token JWT não contém account_id válido",
+                "status": "error"
+            }), 400
+        
+        # Validar formato dos UUIDs
+        try:
+            uuid.UUID(bot_id)
+            uuid.UUID(intent_id)
+        except ValueError:
+            return jsonify({
+                "error": "Bot ID e Intent ID devem ser UUIDs válidos",
+                "status": "error"
+            }), 400
+        
+        # Verificar se o bot existe e pertence à conta do usuário
+        bot = db_manager.get_bot(bot_id)
+        if not bot:
+            return jsonify({
+                "error": "Bot não encontrado",
+                "status": "error"
+            }), 404
+        
+        if bot['account_id'] != account_id:
+            return jsonify({
+                "error": "Acesso negado - bot não pertence à sua conta",
+                "status": "error"
+            }), 403
+        
+        # Buscar intent
+        intent = db_manager.get_intent(intent_id, bot_id)
+        if not intent:
+            return jsonify({
+                "error": "Intent não encontrada",
+                "status": "error"
+            }), 404
+        
+        logger.info(f"✅ Usuário {request.current_user.get('sub')} acessou intent {intent_id} do bot {bot_id}")
+        
+        return jsonify({
+            "status": "success",
+            "intent": intent
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"❌ Erro no endpoint get_intent_by_id: {e}")
+        return jsonify({
+            "error": f"Erro interno do servidor: {str(e)}",
+            "status": "error"
+        }), 500
+
+@app.route('/bots/<bot_id>/intents/<intent_id>', methods=['PUT'])
+@jwt_required
+def update_intent(bot_id, intent_id):
+    """
+    Atualiza uma intent existente
+    """
+    try:
+        # Verificar se o banco está habilitado
+        if not db_manager.enabled:
+            return jsonify({
+                "error": "Banco de dados não está habilitado",
+                "status": "error"
+            }), 503
+        
+        # Obter account_id do token JWT
+        account_id = get_account_id_from_token()
+        if not account_id:
+            return jsonify({
+                "error": "Token JWT não contém account_id válido",
+                "status": "error"
+            }), 400
+        
+        # Validar formato dos UUIDs
+        try:
+            uuid.UUID(bot_id)
+            uuid.UUID(intent_id)
+        except ValueError:
+            return jsonify({
+                "error": "Bot ID e Intent ID devem ser UUIDs válidos",
+                "status": "error"
+            }), 400
+        
+        # Verificar se o bot existe e pertence à conta do usuário
+        bot = db_manager.get_bot(bot_id)
+        if not bot:
+            return jsonify({
+                "error": "Bot não encontrado",
+                "status": "error"
+            }), 404
+        
+        if bot['account_id'] != account_id:
+            return jsonify({
+                "error": "Acesso negado - bot não pertence à sua conta",
+                "status": "error"
+            }), 403
+        
+        # Verificar se a intent existe
+        existing_intent = db_manager.get_intent(intent_id, bot_id)
+        if not existing_intent:
+            return jsonify({
+                "error": "Intent não encontrada",
+                "status": "error"
+            }), 404
+        
+        # Obter dados da requisição
+        data = request.get_json()
+        if not data:
+            return jsonify({
+                "error": "Dados JSON são obrigatórios",
+                "status": "error"
+            }), 400
+        
+        # Preparar parâmetros de atualização
+        update_params = {}
+        
+        if 'name' in data:
+            if data['name'] is not None and len(data['name']) > 50:
+                return jsonify({
+                    "error": "Campo 'name' deve ter no máximo 50 caracteres",
+                    "status": "error"
+                }), 400
+            update_params['name'] = data['name']
+        
+        if 'intention' in data:
+            update_params['intention'] = data['intention']
+        
+        if 'active' in data:
+            update_params['active'] = data['active']
+        
+        if 'prompt' in data:
+            update_params['prompt'] = data['prompt']
+        
+        if 'function_id' in data:
+            if data['function_id'] is not None and len(data['function_id']) > 150:
+                return jsonify({
+                    "error": "Campo 'function_id' deve ter no máximo 150 caracteres",
+                    "status": "error"
+                }), 400
+            update_params['function_id'] = data['function_id']
+        
+        if not update_params:
+            return jsonify({
+                "error": "Nenhum campo para atualizar foi fornecido",
+                "status": "error"
+            }), 400
+        
+        # Atualizar intent
+        success = db_manager.update_intent(
+            intent_id=intent_id,
+            bot_id=bot_id,
+            **update_params
+        )
+        
+        if not success:
+            return jsonify({
+                "error": "Falha ao atualizar intent",
+                "status": "error"
+            }), 500
+        
+        # Buscar intent atualizada
+        updated_intent = db_manager.get_intent(intent_id, bot_id)
+        
+        logger.info(f"✅ Usuário {request.current_user.get('sub')} atualizou intent {intent_id} do bot {bot_id}")
+        
+        return jsonify({
+            "message": "Intent atualizada com sucesso",
+            "status": "success",
+            "intent": updated_intent,
+            "updated_fields": list(update_params.keys())
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"❌ Erro no endpoint update_intent: {e}")
+        return jsonify({
+            "error": f"Erro interno do servidor: {str(e)}",
+            "status": "error"
+        }), 500
+
+@app.route('/bots/<bot_id>/intents/<intent_id>', methods=['DELETE'])
+@jwt_required
+def delete_intent(bot_id, intent_id):
+    """
+    Deleta uma intent permanentemente
+    """
+    try:
+        # Verificar se o banco está habilitado
+        if not db_manager.enabled:
+            return jsonify({
+                "error": "Banco de dados não está habilitado",
+                "status": "error"
+            }), 503
+        
+        # Obter account_id do token JWT
+        account_id = get_account_id_from_token()
+        if not account_id:
+            return jsonify({
+                "error": "Token JWT não contém account_id válido",
+                "status": "error"
+            }), 400
+        
+        # Validar formato dos UUIDs
+        try:
+            uuid.UUID(bot_id)
+            uuid.UUID(intent_id)
+        except ValueError:
+            return jsonify({
+                "error": "Bot ID e Intent ID devem ser UUIDs válidos",
+                "status": "error"
+            }), 400
+        
+        # Verificar se o bot existe e pertence à conta do usuário
+        bot = db_manager.get_bot(bot_id)
+        if not bot:
+            return jsonify({
+                "error": "Bot não encontrado",
+                "status": "error"
+            }), 404
+        
+        if bot['account_id'] != account_id:
+            return jsonify({
+                "error": "Acesso negado - bot não pertence à sua conta",
+                "status": "error"
+            }), 403
+        
+        # Verificar se a intent existe
+        existing_intent = db_manager.get_intent(intent_id, bot_id)
+        if not existing_intent:
+            return jsonify({
+                "error": "Intent não encontrada",
+                "status": "error"
+            }), 404
+        
+        # Deletar intent
+        success = db_manager.delete_intent(intent_id, bot_id)
+        
+        if not success:
+            return jsonify({
+                "error": "Falha ao deletar intent",
+                "status": "error"
+            }), 500
+        
+        logger.info(f"✅ Usuário {request.current_user.get('sub')} deletou intent {intent_id} do bot {bot_id}")
+        
+        return jsonify({
+            "message": "Intent deletada permanentemente com sucesso",
+            "status": "success",
+            "intent_id": intent_id,
+            "bot_id": bot_id,
+            "action": "deletada permanentemente"
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"❌ Erro no endpoint delete_intent: {e}")
+        return jsonify({
+            "error": f"Erro interno do servidor: {str(e)}",
+            "status": "error"
+        }), 500
+
+# ==================== BOTS FUNCTIONS ACTIONS ENDPOINTS ====================
+
+@app.route('/bots/functions/actions', methods=['GET'])
+@jwt_required
+def get_bots_functions_actions():
+    """
+    Lista todas as ações disponíveis para funções de bots
+    """
+    try:
+        # Verificar se o banco está habilitado
+        if not db_manager.enabled:
+            return jsonify({
+                "error": "Banco de dados não está habilitado",
+                "status": "error"
+            }), 503
+        
+        # Obter account_id do token JWT (para logs de auditoria)
+        account_id = get_account_id_from_token()
+        if not account_id:
+            return jsonify({
+                "error": "Token JWT não contém account_id válido",
+                "status": "error"
+            }), 400
+        
+        # Parâmetro opcional para filtrar por tipo de integração
+        integration_type = request.args.get('integration_type')
+        
+        # Buscar ações disponíveis
+        actions = db_manager.get_bots_functions_actions(integration_type=integration_type)
+        
+        # Log de auditoria
+        user_id = request.current_user.get('sub')
+        user_email = request.current_user.get('email', 'unknown')
+        filter_info = f" (filtradas por: {integration_type})" if integration_type else ""
+        logger.info(f"✅ Usuário {user_id} ({user_email}) listou {len(actions)} ações de funções{filter_info}")
+        
+        return jsonify({
+            "status": "success",
+            "actions": actions,
+            "total": len(actions),
+            "filter": {
+                "integration_type": integration_type
+            }
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"❌ Erro no endpoint get_bots_functions_actions: {e}")
+        return jsonify({
+            "error": f"Erro interno do servidor: {str(e)}",
             "status": "error"
         }), 500
 

@@ -31,6 +31,7 @@ Lista todos os bots da conta do usuário autenticado.
       "name": "Bot de Suporte",
       "system_prompt": "Você é um assistente de suporte técnico especializado em resolver problemas de clientes de forma rápida e eficiente...",
       "integration_id": "789e0123-e89b-12d3-a456-426614174000",
+      "agent_name": "Assistente Virtual",
       "created_at": "2024-01-15T10:30:00"
     }
   ],
@@ -59,7 +60,8 @@ Cria um novo bot.
   "id": "550e8400-e29b-41d4-a716-446655440000",
   "name": "Bot de Suporte",
   "system_prompt": "Você é um assistente de suporte técnico especializado em resolver problemas de clientes de forma rápida e eficiente. Suas principais responsabilidades incluem: 1) Diagnosticar problemas técnicos, 2) Fornecer soluções claras e práticas, 3) Escalar para suporte humano quando necessário.",
-  "integration_id": "789e0123-e89b-12d3-a456-426614174000"
+  "integration_id": "789e0123-e89b-12d3-a456-426614174000",
+  "agent_name": "Assistente Virtual"
 }
 ```
 
@@ -70,6 +72,7 @@ Cria um novo bot.
 
 #### Campos Opcionais
 - `integration_id`: UUID da integração associada ao bot
+- `agent_name`: Nome do agente que aparecerá nas mensagens (máximo 100 caracteres)
 
 #### Exemplo de Resposta (Sucesso - 201)
 ```json
@@ -82,6 +85,7 @@ Cria um novo bot.
     "name": "Bot de Suporte",
     "system_prompt": "Você é um assistente de suporte técnico...",
     "integration_id": "789e0123-e89b-12d3-a456-426614174000",
+    "agent_name": "Assistente Virtual",
     "created_at": "2024-01-15T10:30:00"
   }
 }
@@ -108,6 +112,7 @@ Busca um bot específico pelo seu ID.
     "name": "Bot de Suporte",
     "system_prompt": "Você é um assistente de suporte técnico...",
     "integration_id": "789e0123-e89b-12d3-a456-426614174000",
+    "agent_name": "Assistente Virtual",
     "created_at": "2024-01-15T10:30:00"
   }
 }
@@ -127,7 +132,8 @@ Atualiza um bot existente. Apenas os campos fornecidos são atualizados.
 {
   "name": "Bot de Suporte Avançado",
   "system_prompt": "Você é um assistente avançado de suporte técnico com especialização em IA e automação. Suas capacidades incluem: 1) Análise avançada de problemas, 2) Sugestões de otimização, 3) Integração com sistemas externos.",
-  "integration_id": "789e0123-e89b-12d3-a456-426614174000"
+  "integration_id": "789e0123-e89b-12d3-a456-426614174000",
+  "agent_name": "Assistente Virtual"
 }
 ```
 
@@ -142,6 +148,7 @@ Atualiza um bot existente. Apenas os campos fornecidos são atualizados.
     "name": "Bot de Suporte Avançado",
     "system_prompt": "Você é um assistente avançado de suporte técnico...",
     "integration_id": "789e0123-e89b-12d3-a456-426614174000",
+    "agent_name": "Assistente Virtual",
     "created_at": "2024-01-15T10:30:00"
   },
   "updated_fields": ["name", "system_prompt", "integration_id"]
@@ -185,7 +192,8 @@ curl -X POST https://atendimento.pluggerbi.com/bots \
     "id": "550e8400-e29b-41d4-a716-446655440000",
     "name": "Bot de Vendas",
     "system_prompt": "Você é um assistente de vendas especializado em conversão de leads. Sempre seja amigável, profissional e focado em entender as necessidades do cliente.",
-    "integration_id": "789e0123-e89b-12d3-a456-426614174000"
+    "integration_id": "789e0123-e89b-12d3-a456-426614174000",
+    "agent_name": "Consultor de Vendas"
   }'
 ```
 
@@ -196,7 +204,8 @@ curl -X PUT https://atendimento.pluggerbi.com/bots/550e8400-e29b-41d4-a716-44665
   -H "Content-Type: application/json" \
   -d '{
     "name": "Bot de Vendas Premium",
-    "system_prompt": "Você é um assistente premium de vendas com foco em produtos de alto valor..."
+    "system_prompt": "Você é um assistente premium de vendas com foco em produtos de alto valor...",
+    "agent_name": "Especialista Premium"
   }'
 ```
 
@@ -269,7 +278,8 @@ const botData = {
   id: generateUUID(),
   name: 'Bot de FAQ',
   system_prompt: 'Você é um bot especializado em responder perguntas frequentes sobre nossos produtos e serviços. Seja claro, objetivo e sempre direcione para mais informações quando necessário.',
-  integration_id: '789e0123-e89b-12d3-a456-426614174000'
+  integration_id: '789e0123-e89b-12d3-a456-426614174000',
+  agent_name: 'Assistente FAQ'
 };
 
 createBot(jwtToken, botData)

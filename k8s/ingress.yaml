@@ -130,6 +130,13 @@ spec:
             name: whatsapp-webhook-service
             port:
               number: 80
+      - path: /conversations
+        pathType: Prefix
+        backend:
+          service:
+            name: whatsapp-webhook-service
+            port:
+              number: 80
       # WebSocket API endpoints (REST)
       - path: /websocket
         pathType: Prefix

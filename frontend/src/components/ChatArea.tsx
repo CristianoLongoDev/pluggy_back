@@ -1,11 +1,13 @@
 
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { Badge } from '@/components/ui/badge';
-import { Send, Bot, User, MoreVertical, UserPlus, MessageSquare } from 'lucide-react';
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
+import { Send, Bot, User, MoreVertical, UserPlus, MessageSquare, Info, ChevronDown, ChevronUp } from 'lucide-react';
 import { Separator } from '@/components/ui/separator';
+import { validateAndSanitizeMessage } from '@/lib/validation';
 
 interface Message {
   id: string;
@@ -20,6 +22,8 @@ interface ChatAreaProps {
   messages: Message[];
   onSendMessage: (message: string) => void;
   onTransferToHuman: () => void;
+  isInfoExpanded?: boolean;
+  onToggleInfoExpanded?: () => void;
 }
 
 const ChatArea: React.FC<ChatAreaProps> = ({
@@ -27,13 +31,35 @@ const ChatArea: React.FC<ChatAreaProps> = ({
   messages,
   onSendMessage,
   onTransferToHuman,
+  isInfoExpanded = false,
+  onToggleInfoExpanded,
 }) => {
   const [messageInput, setMessageInput] = useState('');
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  // Auto-scroll to bottom when messages change or chat is selected
+  useEffect(() => {
+    if (messagesEndRef.current) {
+      messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [messages, selectedChat]);
+
+  // Debug logs
+  console.log('🎯 ChatArea render - selectedChat:', selectedChat?.id);
+  console.log('💬 ChatArea render - messages count:', messages.length);
+  console.log('📝 ChatArea render - messages:', messages);
 
   const handleSendMessage = () => {
     if (messageInput.trim()) {
-      onSendMessage(messageInput);
-      setMessageInput('');
+      try {
+        const sanitizedMessage = validateAndSanitizeMessage(messageInput);
+        onSendMessage(sanitizedMessage);
+        setMessageInput('');
+      } catch (error) {
+        console.error('Invalid message:', error);
+        // Could show a toast notification here
+        return;
+      }
     }
   };
 
@@ -105,16 +131,46 @@ const ChatArea: React.FC<ChatAreaProps> = ({
                 Transferir
               </Button>
             )}
-            <Button size="sm" variant="ghost">
-              <MoreVertical className="w-4 h-4" />
-            </Button>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button size="sm" variant="ghost">
+                  <MoreVertical className="w-4 h-4" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-52">
+                {onToggleInfoExpanded && (
+                  <DropdownMenuItem onClick={onToggleInfoExpanded}>
+                    <Info className="w-4 h-4 mr-2" />
+                    {isInfoExpanded ? (
+                      <>
+                        <ChevronUp className="w-4 h-4 mr-1" />
+                        Ocultar informações
+                      </>
+                    ) : (
+                      <>
+                        <ChevronDown className="w-4 h-4 mr-1" />
+                        Exibir informações
+                      </>
+                    )}
+                  </DropdownMenuItem>
+                )}
+              </DropdownMenuContent>
+            </DropdownMenu>
           </div>
         </div>
       </div>
 
       {/* Messages Area */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-4">
-        {messages.map((message) => (
+      <div className="flex-1 overflow-y-auto p-4 space-y-3">
+        {messages.length === 0 ? (
+          <div className="flex items-center justify-center h-full">
+            <div className="text-center text-muted-foreground">
+              <MessageSquare className="w-8 h-8 mx-auto mb-2 opacity-50" />
+              <p>Nenhuma mensagem para exibir</p>
+            </div>
+          </div>
+        ) : (
+        messages.map((message) => (
           <div
             key={message.id}
             className={`flex ${message.sender === 'customer' ? 'justify-start' : 'justify-end'}`}
@@ -122,11 +178,11 @@ const ChatArea: React.FC<ChatAreaProps> = ({
             <div
               className={`max-w-[70%] ${
                 message.sender === 'customer'
-                  ? 'bg-muted'
+                  ? 'bg-muted/80 text-foreground rounded-l-lg rounded-tr-lg rounded-br-sm'
                   : message.sender === 'ai'
-                  ? 'bg-blue-500 text-white'
-                  : 'bg-primary text-primary-foreground'
-              } rounded-lg p-3`}
+                  ? 'bg-blue-500 text-white rounded-r-lg rounded-tl-lg rounded-bl-sm'
+                  : 'bg-primary text-primary-foreground rounded-r-lg rounded-tl-lg rounded-bl-sm'
+              } p-3 shadow-sm`}
             >
               {message.sender !== 'customer' && (
                 <div className="flex items-center space-x-1 mb-1">
@@ -136,15 +192,18 @@ const ChatArea: React.FC<ChatAreaProps> = ({
                     <User className="w-3 h-3" />
                   )}
                   <span className="text-xs opacity-80">
-                    {message.sender === 'ai' ? 'IA' : 'Atendente'}
+                    {message.sender === 'ai' ? 'IA' : (selectedChat.botAgentName || 'Atendente')}
                   </span>
                 </div>
               )}
-              <p className="text-sm">{message.content}</p>
+              <p className="text-sm leading-relaxed">{message.content}</p>
               <span className="text-xs opacity-70 mt-1 block">{message.timestamp}</span>
             </div>
           </div>
-        ))}
+        ))
+        )}
+        {/* Invisible element to scroll to */}
+        <div ref={messagesEndRef} />
       </div>
 
       {/* Message Input */}
