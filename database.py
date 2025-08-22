@@ -794,16 +794,6 @@ class DatabaseManager:
         if not self.enabled:
             return None
         def _get_active_conversation_operation(connection):
-            # Timeout específico para esta consulta
-            import signal
-            
-            def timeout_handler(signum, frame):
-                raise TimeoutError("Timeout na consulta get_active_conversation")
-            
-            # Configurar timeout de 10 segundos
-            signal.signal(signal.SIGALRM, timeout_handler)
-            signal.alarm(10)
-            
             try:
                 cursor = connection.cursor(dictionary=True)
                 query = """
@@ -815,8 +805,9 @@ class DatabaseManager:
                 result = cursor.fetchone()
                 cursor.close()
                 return result
-            finally:
-                signal.alarm(0)  # Cancelar timeout
+            except Exception as e:
+                logger.error(f"❌ Erro na consulta get_active_conversation: {e}")
+                return None
                 
         result = self._execute_with_fresh_connection(_get_active_conversation_operation)
         return result
@@ -968,16 +959,6 @@ class DatabaseManager:
         if not self.enabled:
             return []
         def _get_last_user_messages_operation(connection):
-            # Timeout específico para esta consulta
-            import signal
-            
-            def timeout_handler(signum, frame):
-                raise TimeoutError("Timeout na consulta get_last_user_messages")
-            
-            # Configurar timeout de 10 segundos
-            signal.signal(signal.SIGALRM, timeout_handler)
-            signal.alarm(10)
-            
             try:
                 cursor = connection.cursor(dictionary=True)
                 query = """
@@ -991,8 +972,9 @@ class DatabaseManager:
                 messages = cursor.fetchall()
                 cursor.close()
                 return messages
-            finally:
-                signal.alarm(0)  # Cancelar timeout
+            except Exception as e:
+                logger.error(f"❌ Erro na consulta get_last_user_messages: {e}")
+                return []
                 
         result = self._execute_with_fresh_connection(_get_last_user_messages_operation)
         return result
@@ -2745,6 +2727,117 @@ class DatabaseManager:
 
 
 
+
+    def search_conversations_by_message(self, search_term, limit=50, offset=0, account_id=None):
+        """
+        Pesquisa conversas que contêm determinado termo nas mensagens
+        """
+        if not self.enabled:
+            return []
+        
+        def _search_conversations_operation(connection):
+            cursor = connection.cursor(dictionary=True)
+            
+            # Preparar palavras de busca (quebrar por espaços)
+            words = [word.strip() for word in search_term.split() if word.strip()]
+            
+            # Construir condições LIKE para cada palavra
+            like_conditions = []
+            params = []
+            
+            for word in words:
+                like_conditions.append("cm.message_text LIKE %s")
+                params.append(f"%{word}%")
+            
+            # Query base
+            base_query = """
+                SELECT DISTINCT 
+                    c.id as conversation_id,
+                    c.contact_id,
+                    c.status,
+                    c.started_at,
+                    c.ended_at,
+                    c.account_id,
+                    cont.name as contact_name,
+                    cont.phone as contact_phone,
+                    acc.name as account_name,
+                    COUNT(cm.id) as total_messages,
+                    MAX(cm.timestamp) as last_message_at,
+                    GROUP_CONCAT(
+                        DISTINCT SUBSTR(cm.message_text, 1, 100) 
+                        ORDER BY cm.timestamp DESC 
+                        SEPARATOR ' | '
+                    ) as message_preview
+                FROM conversation c
+                INNER JOIN conversation_message cm ON c.id = cm.conversation_id
+                LEFT JOIN contact cont ON c.contact_id = cont.id
+                LEFT JOIN account acc ON c.account_id = acc.id
+                WHERE ({})
+            """.format(" AND ".join(like_conditions))
+            
+            # Adicionar filtro por account_id se fornecido
+            if account_id:
+                base_query += " AND c.account_id = %s"
+                params.append(account_id)
+            
+            # Agrupar e ordenar
+            query = base_query + """
+                GROUP BY c.id
+                ORDER BY MAX(cm.timestamp) DESC
+                LIMIT %s OFFSET %s
+            """
+            
+            params.extend([limit, offset])
+            
+            cursor.execute(query, params)
+            results = cursor.fetchall()
+            cursor.close()
+            
+            return results or []
+        
+        return self._execute_with_fresh_connection(_search_conversations_operation) or []
+    
+    def count_conversations_by_message(self, search_term, account_id=None):
+        """
+        Conta o total de conversas que contêm determinado termo nas mensagens
+        """
+        if not self.enabled:
+            return 0
+        
+        def _count_conversations_operation(connection):
+            cursor = connection.cursor()
+            
+            # Preparar palavras de busca
+            words = [word.strip() for word in search_term.split() if word.strip()]
+            
+            # Construir condições LIKE para cada palavra
+            like_conditions = []
+            params = []
+            
+            for word in words:
+                like_conditions.append("cm.message_text LIKE %s")
+                params.append(f"%{word}%")
+            
+            # Query de contagem
+            query = """
+                SELECT COUNT(DISTINCT c.id) as total
+                FROM conversation c
+                INNER JOIN conversation_message cm ON c.id = cm.conversation_id
+                WHERE ({})
+            """.format(" AND ".join(like_conditions))
+            
+            # Adicionar filtro por account_id se fornecido
+            if account_id:
+                query += " AND c.account_id = %s"
+                params.append(account_id)
+            
+            cursor.execute(query, params)
+            result = cursor.fetchone()
+            cursor.close()
+            
+            return result[0] if result else 0
+        
+        return self._execute_with_fresh_connection(_count_conversations_operation) or 0
 
 # Instância global do DatabaseManager
 db_manager = DatabaseManager() 

@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import signal
+import threading
 import uuid
 import sys
 import time
@@ -37,6 +38,10 @@ class WebhookWorker:
         self.processed_count = 0
         self.error_count = 0
         
+        # Lock por conversa para evitar processamento simultâneo
+        self.conversation_locks = set()
+        self._lock_mutex = threading.Lock()
+        
         # Configurar handler para interrupção
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
@@ -47,6 +52,19 @@ class WebhookWorker:
         self.running = False
         if rabbitmq_manager.channel:
             rabbitmq_manager.channel.stop_consuming()
+    
+    def _acquire_conversation_lock(self, conversation_id):
+        """Tenta adquirir lock para uma conversa. Retorna True se conseguiu, False se já está em uso."""
+        with self._lock_mutex:
+            if conversation_id in self.conversation_locks:
+                return False
+            self.conversation_locks.add(conversation_id)
+            return True
+    
+    def _release_conversation_lock(self, conversation_id):
+        """Libera o lock de uma conversa."""
+        with self._lock_mutex:
+            self.conversation_locks.discard(conversation_id)
     
     def process_webhook_message(self, message):
         """Processa uma mensagem genérica do webhook"""
@@ -70,6 +88,12 @@ class WebhookWorker:
             signal.alarm(30)
             
             try:
+                # VERIFICAÇÃO PRÉVIA: Se for webhook_received, verificar se tem apenas statuses ANTES de qualquer processamento
+                if event_type == 'webhook_received':
+                    if self._should_ignore_statuses_webhook(event_data):
+                        logger.info(f"📊 Ignorando webhook com apenas statuses - sem processamento")
+                        return True  # Sucesso, mas sem processamento
+                
                 # Salvar no banco de dados se disponível (logs antigos)
                 if db_manager.enabled:
                     try:
@@ -481,6 +505,32 @@ class WebhookWorker:
             self.error_count += 1
             return False  # Retornar False para rejeitar mensagem mas manter worker rodando
     
+    def _should_ignore_statuses_webhook(self, event_data):
+        """Verifica rapidamente se o webhook contém apenas statuses (sem messages)"""
+        try:
+            if event_data.get('object') != 'whatsapp_business_account':
+                return False
+                
+            entries = event_data.get('entry', [])
+            has_messages = False
+            has_statuses = False
+            
+            for entry in entries:
+                changes = entry.get('changes', [])
+                for change in changes:
+                    value = change.get('value', {})
+                    if 'messages' in value:
+                        has_messages = True
+                    elif 'statuses' in value:
+                        has_statuses = True
+            
+            # Ignorar se tem apenas statuses (sem messages)
+            return has_statuses and not has_messages
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Erro ao verificar statuses webhook: {e}")
+            return False  # Em caso de erro, não ignorar (processar normalmente)
+    
     def _process_webhook_received(self, event_data):
         """Processa webhook completo recebido"""
         logger.info("🔄 Processando webhook completo...")
@@ -495,7 +545,7 @@ class WebhookWorker:
                 for change in changes:
                     value = change.get('value', {})
                     
-                    # TAREFA 1: Processar apenas webhooks com messages, ignorar statuses
+                    # PROCESSAR apenas webhooks com messages (statuses já filtrados antes)
                     if 'messages' in value:
                         logger.info(f"📱 WEBHOOK-DEBUG: Recebido webhook com messages: {len(value['messages'])} mensagem(ns)")
                         logger.info(f"📱 WEBHOOK-DEBUG: Conteúdo completo do webhook: {json.dumps(value, indent=2)}")
@@ -1283,37 +1333,11 @@ class WebhookWorker:
                     system_prompt_obj['content'] = system_prompt_content
                     logger.info(f"📝 Prompts dinâmicos aplicados: {len(dynamic_prompts)} caracteres")
                 
-                # NOVA FUNCIONALIDADE: Identificação de intenções e aplicação de prompts/funções específicas
-                logger.info(f"🚀 Iniciando identificação de intenção para conversation {conversation_id}")
+                                # IDENTIFICAÇÃO DE INTENÇÃO SERÁ FEITA APÓS O DELAY DE 10s
+                # (removido daqui para o processamento delayed)
                 
-                # Identificar intenção do usuário
-                identified_intent, clarification_question = self._identify_user_intent(
-                    contact['id'], conversation_id, system_prompt_content, channel['bot_id']
-                )
-                
-                intent_functions = []
-                if identified_intent:
-                    # Aplicar prompt e funções específicas da intenção
-                    intent_prompt, intent_functions = self._apply_intent_based_prompts_and_functions(
-                        identified_intent, channel['bot_id']
-                    )
-                    
-                    if intent_prompt:
-                        system_prompt_content = f"{system_prompt_content}\n\n{intent_prompt}"
-                        system_prompt_obj['content'] = system_prompt_content
-                        logger.info(f"🎯 Prompt específico da intenção aplicado: {len(intent_prompt)} caracteres")
-                
-                elif clarification_question:
-                    # Se precisar esclarecer a intenção, enviar pergunta diretamente
-                    logger.info(f"🤔 Pergunta de esclarecimento gerada: {clarification_question}")
-                    # Por enquanto, continua processamento normal. Futuramente pode implementar envio direto da pergunta
-                
-                else:
-                    # Nenhuma intenção identificada (confiança < 30% ou 'none')
-                    logger.info(f"🏃 Continuando sem aplicar intenções específicas - usando apenas prompts base e de eventos")
-                
-                # Combinar todas as funções: conversa + prompts dinâmicos + intenção
-                all_functions = bot_functions + prompt_functions + intent_functions
+                # Combinar funções: conversa + prompts dinâmicos (SEM intenção ainda)
+                all_functions = bot_functions + prompt_functions
                 
                 # Reformatar dados para envio
                 final_system_prompt_content = system_prompt_content
@@ -1329,40 +1353,15 @@ class WebhookWorker:
                     system_prompt_content = f"{system_prompt_content}\n\n{dynamic_prompts}"
                     logger.info(f"📝 Prompts dinâmicos aplicados: {len(dynamic_prompts)} caracteres")
                 
-                # NOVA FUNCIONALIDADE: Identificação de intenções e aplicação de prompts/funções específicas
-                logger.info(f"🚀 Iniciando identificação de intenção para conversation {conversation_id}")
-                
-                # Identificar intenção do usuário
-                identified_intent, clarification_question = self._identify_user_intent(
-                    contact['id'], conversation_id, system_prompt_content, channel['bot_id']
-                )
-                
-                intent_functions = []
-                if identified_intent:
-                    # Aplicar prompt e funções específicas da intenção
-                    intent_prompt, intent_functions = self._apply_intent_based_prompts_and_functions(
-                        identified_intent, channel['bot_id']
-                    )
-                    
-                    if intent_prompt:
-                        system_prompt_content = f"{system_prompt_content}\n\n{intent_prompt}"
-                        logger.info(f"🎯 Prompt específico da intenção aplicado: {len(intent_prompt)} caracteres")
-                
-                elif clarification_question:
-                    # Se precisar esclarecer a intenção, enviar pergunta diretamente
-                    logger.info(f"🤔 Pergunta de esclarecimento gerada: {clarification_question}")
-                    # Por enquanto, continua processamento normal. Futuramente pode implementar envio direto da pergunta
-                
-                else:
-                    # Nenhuma intenção identificada (confiança < 30% ou 'none')
-                    logger.info(f"🏃 Continuando sem aplicar intenções específicas - usando apenas prompts base e de eventos")
+                                # IDENTIFICAÇÃO DE INTENÇÃO SERÁ FEITA APÓS O DELAY DE 10s
+                # (removido daqui para o processamento delayed)
                 
                 # Converter para formato JSON
                 system_prompt_obj = {
                     "role": "system", 
                     "content": system_prompt_content
                 }
-                all_functions = prompt_functions + intent_functions
+                all_functions = prompt_functions
                 final_system_prompt_content = system_prompt_content
             
             logger.info(f"🔧 Total de {len(all_functions)} funções preparadas para ChatGPT")
@@ -2203,6 +2202,26 @@ INSTRUÇÕES:
             created_at = event_data.get('created_at', 0)
             task_created_timestamp = event_data.get('task_created_timestamp', created_at)
             
+            logger.info(f"🔍 Processando delay check para {contact_id} (task criada em: {task_created_timestamp})")
+            
+            # 🕒 VERIFICAR SE ESTA É A DELAYED TASK MAIS RECENTE
+            # Se chegaram novas mensagens depois desta task ser criada, ignorar esta task
+            recent_messages = db_manager.get_last_user_messages(conversation_id, limit=1)
+            if recent_messages:
+                last_message_time = recent_messages[0].get('timestamp')
+                if last_message_time:
+                    # Converter timestamp da mensagem para float
+                    if isinstance(last_message_time, str):
+                        last_msg_dt = datetime.fromisoformat(last_message_time.replace('Z', '+00:00'))
+                        last_msg_timestamp = last_msg_dt.timestamp()
+                    else:
+                        last_msg_timestamp = last_message_time.timestamp() if hasattr(last_message_time, 'timestamp') else float(last_message_time)
+                    
+                    # Se a última mensagem chegou DEPOIS desta task ser criada, ignorar esta task
+                    if last_msg_timestamp > task_created_timestamp + 1:  # +1s de tolerância
+                        logger.info(f"⏭️ Ignorando delayed task obsoleta - mensagem mais recente às {last_msg_timestamp} vs task criada às {task_created_timestamp}")
+                        return  # Task obsoleta, não processar
+            
             # NOVOS PARÂMETROS das tarefas 3 e 4
             system_prompt = event_data.get('system_prompt')  # Manter compatibilidade com formato antigo
             system_prompt_json = event_data.get('system_prompt_json')  # Novo formato JSON
@@ -2318,10 +2337,13 @@ INSTRUÇÕES:
             logger.info(f"🔍 DEBUG - Agora: {agora}, Timestamp msg: {ts}, Diff: {diff:.1f}s")
             
             if diff >= 10:
-                # Já se passaram 10s, processar com ChatGPT usando conversation.system_prompt
-                logger.info(f"📊 ETAPA 7 - ✅ 10s aguardados, enviando para ChatGPT...")
+                # Já se passaram 10s, processar com ChatGPT APÓS identificar intenção
+                logger.info(f"📊 ETAPA 7 - ✅ 10s aguardados, identificando intenção e enviando para ChatGPT...")
                 try:
-                    self._process_chatgpt_with_conversation_config(contact_id, conversation_id)
+                    # AGORA SIM: Identificar intenção APÓS os 10s com TODO o contexto
+                    self._process_chatgpt_with_intent_identification(
+                        contact_id, conversation_id, final_system_prompt, chatgpt_functions, bot_id, channel_id
+                    )
                     logger.info(f"📊 ETAPA 7 - SUCESSO: ChatGPT processado com sucesso")
                 except Exception as e:
                     logger.error(f"📊 ETAPA 7 - ERRO no ChatGPT: {e}")
@@ -2370,8 +2392,9 @@ INSTRUÇÕES:
                     else:
                         logger.info(f"📊 ETAPA 9 - Nenhuma mensagem nova, processando com ChatGPT...")
                         try:
-                            self._process_chatgpt_response_with_bot_config(
-                                contact_id, None, final_system_prompt, chatgpt_functions, bot_id, channel_id
+                            # AGORA SIM: Identificar intenção APÓS os 10s com TODO o contexto
+                            self._process_chatgpt_with_intent_identification(
+                                contact_id, conversation_id, final_system_prompt, chatgpt_functions, bot_id, channel_id
                             )
                             logger.info(f"📊 ETAPA 9 - SUCESSO: ChatGPT processado com sucesso")
                         except Exception as e:
@@ -2387,6 +2410,60 @@ INSTRUÇÕES:
             import traceback
             logger.error(f"❌ Traceback completo: {traceback.format_exc()}")
             raise
+        finally:
+            # Limpeza automática - sem locks necessários com nova abordagem de timestamp
+            pass
+
+    def _process_chatgpt_with_intent_identification(self, contact_id, conversation_id, system_prompt=None, chatgpt_functions=None, bot_id=None, channel_id=None):
+        """Processa ChatGPT APÓS identificar intenção com TODO o contexto das mensagens"""
+        logger.info(f"🎯 INICIANDO processamento com identificação de intenção APÓS delay para conversation {conversation_id}")
+        
+        try:
+            # Primeiro: Parse do system_prompt para extrair conteúdo 
+            if isinstance(system_prompt, str):
+                try:
+                    system_prompt_obj = json.loads(system_prompt)
+                    system_prompt_content = system_prompt_obj.get('content', system_prompt)
+                except json.JSONDecodeError:
+                    system_prompt_content = system_prompt
+            else:
+                system_prompt_content = system_prompt
+            
+            # AGORA SIM: Identificar intenção com TODO o contexto (após 10s)
+            logger.info(f"🚀 Iniciando identificação de intenção para conversation {conversation_id}")
+            identified_intent, clarification_question = self._identify_user_intent(
+                contact_id, conversation_id, system_prompt_content, bot_id
+            )
+            
+            # Aplicar intenção se identificada
+            final_functions = chatgpt_functions or []
+            if identified_intent:
+                # Aplicar prompt e funções específicas da intenção
+                intent_prompt, intent_functions = self._apply_intent_based_prompts_and_functions(
+                    identified_intent, bot_id
+                )
+                
+                if intent_prompt:
+                    system_prompt_content = f"{system_prompt_content}\n\n{intent_prompt}"
+                    logger.info(f"🎯 Prompt específico da intenção aplicado: {len(intent_prompt)} caracteres")
+                
+                # Combinar funções
+                final_functions = final_functions + intent_functions
+                logger.info(f"✅ Intent aplicada - Prompt: {len(intent_prompt) if intent_prompt else 0} chars, Funções: {len(intent_functions)}")
+            
+            logger.info(f"🔧 Total de {len(final_functions)} funções preparadas para ChatGPT")
+            
+            # Processar com ChatGPT usando configuração final
+            return self._process_chatgpt_response_internal(
+                contact_id, None, system_prompt_content, final_functions
+            )
+            
+        except Exception as e:
+            logger.error(f"❌ Erro na identificação de intenção para conversation {conversation_id}: {e}")
+            # Fallback: processar sem intenção
+            return self._process_chatgpt_response_with_bot_config(
+                contact_id, None, system_prompt, chatgpt_functions, bot_id, channel_id
+            )
 
     def _process_chatgpt_response_with_bot_config(self, contact_id, message_text, system_prompt=None, chatgpt_functions=None, bot_id=None, channel_id=None):
         """Processa mensagem com ChatGPT usando configuração do bot"""
@@ -2419,26 +2496,18 @@ INSTRUÇÕES:
                 
                 # Gerar resposta com ChatGPT customizado
                 try:
-                    import signal
+                    # NOTA: Removido signal.signal() - não funciona em threads secundárias
+                    # O timeout será gerenciado pelo próprio ChatGPT service
                     
-                    def timeout_handler(signum, frame):
-                        raise TimeoutError("ChatGPT timeout")
-                    
-                    signal.signal(signal.SIGALRM, timeout_handler)
-                    signal.alarm(45)
-                    
-                    try:
-                        # Usar método customizado com system_prompt e funções
-                        if hasattr(chatgpt_service, 'process_message_with_config'):
-                            chatgpt_response = chatgpt_service.process_message_with_config(
-                                contact_id, message_text, system_prompt, chatgpt_functions
-                            )
-                        else:
-                            # Fallback para método padrão
-                            logger.warning("⚠️ process_message_with_config não disponível, usando método padrão")
-                            chatgpt_response = chatgpt_service.process_message(contact_id, message_text)
-                    finally:
-                        signal.alarm(0)
+                    # Usar método customizado com system_prompt e funções
+                    if hasattr(chatgpt_service, 'process_message_with_config'):
+                        chatgpt_response = chatgpt_service.process_message_with_config(
+                            contact_id, message_text, system_prompt, chatgpt_functions
+                        )
+                    else:
+                        # Fallback para método padrão
+                        logger.warning("⚠️ process_message_with_config não disponível, usando método padrão")
+                        chatgpt_response = chatgpt_service.process_message(contact_id, message_text)
                         
                 except TimeoutError:
                     logger.error(f"⏰ Timeout no ChatGPT customizado para {contact_id}")
@@ -2587,19 +2656,9 @@ INSTRUÇÕES:
                 
                 # Gerar resposta com ChatGPT com timeout
                 try:
-                    import signal
-                    
-                    def timeout_handler(signum, frame):
-                        raise TimeoutError("ChatGPT timeout")
-                    
-                    # Configurar timeout de 45 segundos
-                    signal.signal(signal.SIGALRM, timeout_handler)
-                    signal.alarm(45)
-                    
-                    try:
-                        chatgpt_response = chatgpt_service.process_message(contact_id, message_text)
-                    finally:
-                        signal.alarm(0)  # Cancelar timeout
+                    # NOTA: Removido signal.signal() - não funciona em threads secundárias
+                    # O timeout será gerenciado pelo próprio ChatGPT service
+                    chatgpt_response = chatgpt_service.process_message(contact_id, message_text)
                         
                 except TimeoutError:
                     logger.error(f"⏰ Timeout no ChatGPT para {contact_id}")
@@ -2901,8 +2960,6 @@ INSTRUÇÕES:
             
             # Salvar mensagem de timeout (SEM enviar para usuário)
             timeout_message = f"Se passaram {timeout_duration//60} minutos sem resposta do usuário. Fica entendido que usuário não tem mais nada a acrescentar."
-            
-            from datetime import datetime
             message_id = db_manager.insert_conversation_message(
                 conversation_id=conversation_id,
                 message_text=timeout_message,
@@ -2931,6 +2988,31 @@ INSTRUÇÕES:
             import traceback
             logger.error(f"❌ Traceback: {traceback.format_exc()}")
     
+    def process_chatgpt_delayed_message(self, message):
+        """Processa mensagens delayed do ChatGPT vindas do RabbitMQ delayed exchange"""
+        try:
+            logger.info(f"🔍 Processando mensagem delayed do ChatGPT")
+            
+            # Verificar se é uma tarefa do ChatGPT
+            task_type = message.get('task_type')
+            if task_type == 'chatgpt_delay_check':
+                # Processar diretamente como delay check
+                self._process_chatgpt_delay_check(message)
+                return True
+            elif task_type == 'conversation_timeout':
+                # Processar timeout de conversa
+                self._process_conversation_timeout(message)
+                return True
+            else:
+                logger.warning(f"⚠️ Tipo de tarefa delayed desconhecido: {task_type}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"❌ Erro ao processar mensagem delayed: {e}")
+            import traceback
+            logger.error(f"❌ Traceback: {traceback.format_exc()}")
+            return False
+    
     def start_consuming(self, queue_name):
         """Inicia o consumo de uma fila específica"""
         if not RABBITMQ_ENABLED:
@@ -2942,6 +3024,27 @@ INSTRUÇÕES:
         logger.info(f"Worker PID: {os.getpid()}")
         logger.info(f"Timestamp: {datetime.now().isoformat()}")
         logger.info("=" * 60)
+        
+        # Se for fila webhook_messages, também consumir chatgpt_process (delayed)
+        if queue_name == 'webhook_messages':
+            import threading
+            def consume_delayed():
+                try:
+                    logger.info("🎧 Iniciando thread para consumo de mensagens delayed...")
+                    # Criar instância separada do RabbitMQ para evitar conflitos entre threads
+                    from rabbitmq_manager import RabbitMQManager
+                    delayed_rabbitmq = RabbitMQManager()
+                    
+                    def delayed_callback(message):
+                        return self.process_chatgpt_delayed_message(message)
+                    
+                    delayed_rabbitmq.consume_messages('chatgpt_process', delayed_callback)
+                except Exception as e:
+                    logger.error(f"❌ Erro no consumo delayed: {e}")
+            
+            delayed_thread = threading.Thread(target=consume_delayed, daemon=True)
+            delayed_thread.start()
+            logger.info("🚀 Thread delayed iniciada")
 
         # Variáveis de monitoramento de saúde
         last_message_time = time.time()

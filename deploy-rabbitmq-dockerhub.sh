@@ -16,7 +16,7 @@ NC='\033[0m' # No Color
 # Configurações
 DOCKER_USERNAME="cristianopluggerbi"
 IMAGE_NAME="rabbitmq-webhook"
-TAG="latest"
+TAG="with-plugin"
 FULL_IMAGE_NAME="${DOCKER_USERNAME}/${IMAGE_NAME}:${TAG}"
 NAMESPACE="whatsapp-webhook"
 DEPLOYMENT_FILE="k8s/rabbitmq-deployment-optimized.yaml"
@@ -120,6 +120,14 @@ fi
 echo -e "${GREEN}✅ Deployment aplicado com sucesso${NC}"
 
 echo -e "${YELLOW}⏳ Aguardando deployment ser processado...${NC}"
+sleep 10
+
+# Deletar pod
+echo -e "${YELLOW}📊 Deletando pod...${NC}"
+kubectl delete pod -n whatsapp-webhook -l app=rabbitmq
+
+# Aguardar deployment
+echo -e "${YELLOW}⏳ Aguardando pod ser criado...${NC}"
 sleep 10
 
 check_pod_status

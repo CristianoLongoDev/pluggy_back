@@ -63,12 +63,47 @@ class RabbitMQManager:
     def _declare_queues(self):
         """Declara todas as filas necessárias"""
         try:
+            # Declarar exchange delayed (se suportado)
+            try:
+                self.channel.exchange_declare(
+                    exchange='chatgpt_delayed',
+                    exchange_type='x-delayed-message',
+                    arguments={'x-delayed-type': 'direct'},
+                    durable=True
+                )
+                logger.info("📝 Exchange delayed 'chatgpt_delayed' declarado")
+                self.delayed_exchange_available = True
+            except Exception as e:
+                logger.warning(f"⚠️ Plugin delayed exchange não disponível: {e}")
+                self.delayed_exchange_available = False
+            
+            # Declarar filas normais
             for queue_name in self.queues:
                 self.channel.queue_declare(
                     queue=queue_name,
                     durable=True  # Fila persistente
                 )
                 logger.info(f"📝 Fila '{queue_name}' declarada")
+                
+            # Declarar fila para delayed messages
+            self.channel.queue_declare(
+                queue='chatgpt_process',
+                durable=True
+            )
+            logger.info("📝 Fila 'chatgpt_process' declarada")
+            
+            # Bind fila ao exchange delayed (só se exchange disponível)
+            if hasattr(self, 'delayed_exchange_available') and self.delayed_exchange_available:
+                try:
+                    self.channel.queue_bind(
+                        exchange='chatgpt_delayed',
+                        queue='chatgpt_process',
+                        routing_key='process'
+                    )
+                    logger.info("📝 Bind fila 'chatgpt_process' ao exchange delayed")
+                except Exception as e:
+                    logger.warning(f"⚠️ Erro ao fazer bind delayed: {e}")
+                
         except Exception as e:
             logger.error(f"❌ Erro ao declarar filas: {e}")
             raise
@@ -147,14 +182,49 @@ class RabbitMQManager:
                 return False
     
     def publish_with_delay(self, message: Dict[Any, Any], delay_seconds: int = 10) -> bool:
-        """Publica uma mensagem com delay na fila de ChatGPT"""
-        import time
-        
-        # Adicionar timestamp de quando deve ser processada
-        message['scheduled_time'] = time.time() + delay_seconds
-        message['delay_seconds'] = delay_seconds
-        
-        return self.publish_message(CHATGPT_DELAY_QUEUE, message)
+        """Publica uma mensagem com delay usando RabbitMQ delayed exchange"""
+        if not self.enabled:
+            logger.warning("⚠️ RabbitMQ desabilitado - mensagem delayed não enviada")
+            return False
+            
+        with self._lock:
+            try:
+                if not self._ensure_connection():
+                    logger.error("❌ Não foi possível conectar ao RabbitMQ")
+                    return False
+                
+                # Preparar mensagem
+                message_body = json.dumps(message, ensure_ascii=False)
+                delay_ms = delay_seconds * 1000  # Converter para milissegundos
+                
+                # Verificar se delayed exchange está disponível
+                if hasattr(self, 'delayed_exchange_available') and self.delayed_exchange_available:
+                    try:
+                        self.channel.basic_publish(
+                            exchange='chatgpt_delayed',
+                            routing_key='process',
+                            body=message_body,
+                            properties=pika.BasicProperties(
+                                delivery_mode=2,  # Mensagem persistente
+                                timestamp=int(time.time()),
+                                content_type='application/json',
+                                headers={'x-delay': delay_ms}  # Delay em milissegundos
+                            )
+                        )
+                        logger.info(f"📤 Mensagem delayed enviada ({delay_seconds}s) para exchange 'chatgpt_delayed'")
+                        return True
+                        
+                    except Exception as delayed_error:
+                        logger.warning(f"⚠️ Delayed exchange falhou: {delayed_error}")
+                        self.delayed_exchange_available = False
+                
+                # Fallback: processar imediatamente sem delay
+                logger.warning(f"🚀 Plugin delayed não disponível, enviando para processamento direto")
+                return self.publish_message('chatgpt_process', message)
+                
+            except Exception as e:
+                logger.error(f"❌ Erro ao publicar mensagem delayed: {e}")
+                return False
     
     def publish_webhook_event(self, event_type: str, event_data: Dict[Any, Any]) -> bool:
         """Publica um evento do webhook na fila apropriada"""
@@ -212,7 +282,7 @@ class RabbitMQManager:
                         ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
             
             # Configurar consumidor
-            self.channel.basic_qos(prefetch_count=1)  # Processar uma mensagem por vez
+            self.channel.basic_qos(prefetch_count=3)  # Processar até 3 mensagens simultaneamente
             self.channel.basic_consume(
                 queue=queue_name,
                 on_message_callback=wrapper_callback,

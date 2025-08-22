@@ -42,7 +42,7 @@ spec:
     spec:
       containers:
       - name: rabbitmq
-        image: cristianopluggerbi/rabbitmq-webhook:latest
+        image: cristianopluggerbi/rabbitmq-webhook:with-plugin
         ports:
         - containerPort: 5672
           name: amqp

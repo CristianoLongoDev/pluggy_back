@@ -6557,6 +6557,96 @@ if __name__ == '__main__':
     else:
         logger.info("🐰 RabbitMQ desabilitado")
     
+@app.route('/api/conversations/search', methods=['POST'])
+@token_required
+def search_conversations(current_user):
+    """
+    API para pesquisar conversas por termos nas mensagens
+    """
+    try:
+        # Verificar se o banco está habilitado
+        if not db_manager.enabled:
+            return jsonify({
+                "error": "Banco de dados não está habilitado",
+                "status": "error"
+            }), 503
+        
+        # Obter dados do JSON
+        data = request.get_json()
+        
+        # Validação dos dados obrigatórios
+        if not data:
+            return jsonify({
+                "error": "Dados JSON são obrigatórios",
+                "status": "error"
+            }), 400
+        
+        if 'search_term' not in data or not data['search_term']:
+            return jsonify({
+                "error": "Campo 'search_term' é obrigatório",
+                "status": "error"
+            }), 400
+        
+        search_term = data['search_term'].strip()
+        
+        if len(search_term) < 3:
+            return jsonify({
+                "error": "Termo de busca deve ter pelo menos 3 caracteres",
+                "status": "error"
+            }), 400
+        
+        # Parâmetros opcionais
+        limit = data.get('limit', 50)
+        offset = data.get('offset', 0)
+        account_id = data.get('account_id')  # Filtrar por conta específica
+        
+        # Validar limit
+        if limit > 100:
+            limit = 100
+        
+        logger.info(f"🔍 Pesquisando conversas com termo: '{search_term}' (limit: {limit}, offset: {offset})")
+        
+        # Buscar conversas com o termo
+        conversations = db_manager.search_conversations_by_message(
+            search_term=search_term,
+            limit=limit,
+            offset=offset,
+            account_id=account_id
+        )
+        
+        # Contar total de resultados para paginação
+        total_count = db_manager.count_conversations_by_message(
+            search_term=search_term,
+            account_id=account_id
+        )
+        
+        return jsonify({
+            "success": True,
+            "data": {
+                "conversations": conversations,
+                "pagination": {
+                    "total": total_count,
+                    "limit": limit,
+                    "offset": offset,
+                    "has_next": offset + limit < total_count
+                },
+                "search_info": {
+                    "term": search_term,
+                    "results_count": len(conversations)
+                }
+            },
+            "status": "success"
+        })
+        
+    except Exception as e:
+        logger.error(f"❌ Erro na pesquisa de conversas: {e}")
+        logger.error(f"❌ Traceback: {traceback.format_exc()}")
+        return jsonify({
+            "error": f"Erro interno: {str(e)}",
+            "status": "error"
+        }), 500
+
+if __name__ == '__main__':
     # Iniciar servidor Flask
     logger.info(f"🌐 Iniciando servidor Flask em {HOST}:{PORT}")
     
