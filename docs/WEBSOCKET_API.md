@@ -8,7 +8,7 @@ Esta API WebSocket permite comunicação em tempo real entre o frontend e o sist
 - Enviar mensagens
 - Monitorar conversas específicas
 
-**URL do WebSocket:** `wss://atendimento.pluggerbi.com/ws`
+**URL do WebSocket:** `wss://pluggyapi.pluggerbi.com/ws`
 
 ---
 
@@ -16,7 +16,7 @@ Esta API WebSocket permite comunicação em tempo real entre o frontend e o sist
 
 ### **1. Conectar ao WebSocket**
 ```javascript
-const ws = new WebSocket('wss://atendimento.pluggerbi.com/ws');
+const ws = new WebSocket('wss://pluggyapi.pluggerbi.com/ws');
 ```
 
 ### **2. Autenticar (OBRIGATÓRIO)**
@@ -134,11 +134,12 @@ ws.send(JSON.stringify({
         "id": "msg_001",
         "conversation_id": 123,
         "content": "Olá! Como posso ajudar?",
-        "sender": "customer",           // customer|agent|ai
+        "sender": "user",               // user|agent|human (valor original da tabela)
         "timestamp": "2024-01-15T10:30:00Z",
         "channel": "whatsapp",
         "message_type": "text",
         "tokens": 0,
+        "user_id": null,                // ID do usuário responsável (null se não definido)
         "metadata": {
           "contact": {
             "id": "contact_123",
@@ -171,8 +172,8 @@ ws.send(JSON.stringify({
   data: {
     conversation_id: 123,           // OBRIGATÓRIO
     content: "Olá! Como posso ajudar?", // OBRIGATÓRIO
-    sender: "agent",                // Opcional, padrão: "agent"
-    user_id: "user-uuid-12345"      // Opcional: ID do usuário que enviou (para mensagens humanas)
+    sender: "human",                // OBRIGATÓRIO: user|agent|human
+    user_id: "user-uuid-12345"      // Opcional: ID do usuário que enviou
   }
 }));
 ```
@@ -340,12 +341,13 @@ export const useWebSocket = (url, token) => {
     if (!ws || !isConnected) return;
     
     ws.send(JSON.stringify({
-      type: 'send_message',
-      data: { 
-        conversation_id: conversationId, 
-        content,
-        user_id: userId  // Incluir user_id quando disponível
-      }
+  type: 'send_message',
+  data: { 
+    conversation_id: conversationId, 
+    content,
+    sender: "human",     // OBRIGATÓRIO: user|agent|human
+    user_id: userId      // Incluir user_id quando disponível
+  }
     }));
   }, [ws, isConnected]);
 
@@ -373,7 +375,7 @@ export const useWebSocket = (url, token) => {
 ```javascript
 function ChatApp() {
   const { isConnected, messages, getMessages, sendMessage, subscribeConversations } = 
-    useWebSocket('wss://atendimento.pluggerbi.com/ws', userToken);
+    useWebSocket('wss://pluggyapi.pluggerbi.com/ws', userToken);
 
   useEffect(() => {
     if (isConnected) {
@@ -409,11 +411,12 @@ function ChatApp() {
 | `id` | string | ID único da mensagem |
 | `conversation_id` | number | ID da conversa (CRÍTICO para agrupamento) |
 | `content` | string | Conteúdo da mensagem |
-| `sender` | string | `customer`\|`agent`\|`ai` |
+| `sender` | string | `user`\|`agent`\|`human` (valor original da tabela) |
 | `timestamp` | string | ISO 8601 format |
 | `channel` | string | Sempre `whatsapp` |
 | `message_type` | string | `text`\|`image`\|`document`\|`audio` |
 | `tokens` | number | Tokens usados (se IA) |
+| `user_id` | number\|null | ID do usuário responsável pela mensagem |
 | `metadata` | object | Informações adicionais |
 
 ### **Campos da Conversa (subscription_updated)** 

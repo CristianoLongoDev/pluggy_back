@@ -24,12 +24,14 @@ Authorization: Bearer <jwt_token>
 ```json
 {
   "content": "Olá! Como posso ajudar você hoje?",
+  "sender": "human",
   "user_id": "user-uuid-12345"  // Opcional: ID do usuário que está enviando
 }
 ```
 
 #### **Campos obrigatórios:**
 - `content` (string): Conteúdo da mensagem (não pode estar vazio)
+- `sender` (string): Tipo do remetente (`human` ou `agent`)
 
 #### **Campos opcionais:**
 - `user_id` (string): UUID do usuário que está enviando a mensagem (para auditoria)
@@ -73,6 +75,13 @@ Mensagem salva no banco mas não enviada para o canal:
 {
   "success": false,
   "error": "Campo 'content' é obrigatório e não pode estar vazio"
+}
+```
+
+```json
+{
+  "success": false,
+  "error": "Campo 'sender' é obrigatório"
 }
 ```
 
@@ -124,7 +133,7 @@ Mensagem salva no banco mas não enviada para o canal:
 INSERT INTO conversation_message (
   conversation_id,
   message_text,      -- Conteúdo sem prefixo
-  sender,            -- 'agent' (agente humano)
+  sender,            -- Valor enviado pelo frontend ('human' ou 'agent')
   message_type,      -- 'text'
   timestamp,         -- Timestamp atual
   user_id            -- UUID do usuário (opcional)
@@ -140,6 +149,7 @@ curl -X POST "https://atendimento.pluggerbi.com/conversations/123/send-message" 
   -H "Content-Type: application/json" \
   -d '{
     "content": "Olá! Recebi sua solicitação e vou analisar o problema.",
+    "sender": "human",
     "user_id": "user-uuid-12345"
   }'
 ```
@@ -154,6 +164,7 @@ const response = await fetch('/conversations/123/send-message', {
   },
   body: JSON.stringify({
     content: 'Olá! Como posso ajudar você hoje?',
+    sender: 'human',
     user_id: 'user-uuid-12345'
   })
 });

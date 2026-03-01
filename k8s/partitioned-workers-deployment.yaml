@@ -1,0 +1,460 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: partitioned-msg-worker-0
+  namespace: whatsapp-webhook
+  labels:
+    app: partitioned-msg-worker
+    partition: "0"
+    version: v2-partitioned
+spec:
+  replicas: 1  # 1 replica por partição para manter ordem
+  selector:
+    matchLabels:
+      app: partitioned-msg-worker
+      partition: "0"
+  template:
+    metadata:
+      labels:
+        app: partitioned-msg-worker
+        partition: "0"
+        version: v2-partitioned
+    spec:
+      containers:
+      - name: partitioned-msg-worker
+        image: cristianopluggerbi/webhook-worker:latest
+        imagePullPolicy: Always
+        
+        # Comando para executar o worker particionado
+        args: ["python", "partitioned_message_worker.py"]
+        
+        env:
+        - name: PARTITION_ID
+          value: "0"  # Partição específica
+        - name: DB_HOST
+          value: "10.0.10.69"
+        - name: DB_PORT
+          value: "6446"
+        - name: DB_NAME
+          value: "atendimento"
+        - name: DB_USER
+          value: "atendimento"
+        - name: DB_PASSWORD
+          value: "8/vLQv98vCmw%Ox1"
+        - name: DB_ENABLED
+          value: "True"
+        - name: RABBITMQ_HOST
+          value: "rabbitmq-service.whatsapp-webhook.svc.cluster.local"
+        - name: RABBITMQ_PORT
+          value: "5672"
+        - name: RABBITMQ_USER
+          valueFrom:
+            secretKeyRef:
+              name: rabbitmq-secret
+              key: username
+        - name: RABBITMQ_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: rabbitmq-secret
+              key: password
+        - name: RABBITMQ_ENABLED
+          value: "True"
+        - name: LOG_LEVEL
+          value: "INFO"
+        
+        # Recursos otimizados
+        resources:
+          requests:
+            memory: "32Mi"
+            cpu: "20m"
+          limits:
+            memory: "128Mi"
+            cpu: "200m"
+        
+        # Health checks
+        livenessProbe:
+          exec:
+            command:
+            - python
+            - -c
+            - "import sys; import os; sys.exit(0 if os.path.exists('/tmp/partitioned_message_worker.log') else 1)"
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          timeoutSeconds: 5
+          failureThreshold: 3
+        
+        readinessProbe:
+          exec:
+            command:
+            - /bin/sh
+            - -c
+            - "test -f /tmp/partitioned_message_worker.log && echo 'Worker ready'"
+          initialDelaySeconds: 20
+          periodSeconds: 15
+          timeoutSeconds: 5
+          failureThreshold: 3
+        
+        # Volume para logs
+        volumeMounts:
+        - name: tmp-logs
+          mountPath: /tmp
+      
+      volumes:
+      - name: tmp-logs
+        emptyDir:
+          sizeLimit: "50Mi"
+      
+      # Configurações de segurança
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        fsGroup: 1001
+      
+      restartPolicy: Always
+      
+      # Usar secret do Docker Hub para evitar rate limits
+      imagePullSecrets:
+      - name: dockerhub-secret
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: partitioned-msg-worker-1
+  namespace: whatsapp-webhook
+  labels:
+    app: partitioned-msg-worker
+    partition: "1"
+    version: v2-partitioned
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: partitioned-msg-worker
+      partition: "1"
+  template:
+    metadata:
+      labels:
+        app: partitioned-msg-worker
+        partition: "1"
+        version: v2-partitioned
+    spec:
+      containers:
+      - name: partitioned-msg-worker
+        image: cristianopluggerbi/webhook-worker:latest
+        imagePullPolicy: Always
+        args: ["python", "partitioned_message_worker.py"]
+        
+        env:
+        - name: PARTITION_ID
+          value: "1"
+        - name: DB_HOST
+          value: "10.0.10.69"
+        - name: DB_PORT
+          value: "6446"
+        - name: DB_NAME
+          value: "atendimento"
+        - name: DB_USER
+          value: "atendimento"
+        - name: DB_PASSWORD
+          value: "8/vLQv98vCmw%Ox1"
+        - name: DB_ENABLED
+          value: "True"
+        - name: RABBITMQ_HOST
+          value: "rabbitmq-service.whatsapp-webhook.svc.cluster.local"
+        - name: RABBITMQ_PORT
+          value: "5672"
+        - name: RABBITMQ_USER
+          valueFrom:
+            secretKeyRef:
+              name: rabbitmq-secret
+              key: username
+        - name: RABBITMQ_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: rabbitmq-secret
+              key: password
+        - name: RABBITMQ_ENABLED
+          value: "True"
+        - name: LOG_LEVEL
+          value: "INFO"
+        
+        resources:
+          requests:
+            memory: "32Mi"
+            cpu: "20m"
+          limits:
+            memory: "128Mi"
+            cpu: "200m"
+        
+        livenessProbe:
+          exec:
+            command:
+            - python
+            - -c
+            - "import sys; import os; sys.exit(0 if os.path.exists('/tmp/partitioned_message_worker.log') else 1)"
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          timeoutSeconds: 5
+          failureThreshold: 3
+        
+        readinessProbe:
+          exec:
+            command:
+            - /bin/sh
+            - -c
+            - "test -f /tmp/partitioned_message_worker.log && echo 'Worker ready'"
+          initialDelaySeconds: 20
+          periodSeconds: 15
+          timeoutSeconds: 5
+          failureThreshold: 3
+        
+        volumeMounts:
+        - name: tmp-logs
+          mountPath: /tmp
+      
+      volumes:
+      - name: tmp-logs
+        emptyDir:
+          sizeLimit: "50Mi"
+      
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        fsGroup: 1001
+      
+      restartPolicy: Always
+      
+      # Usar secret do Docker Hub para evitar rate limits
+      imagePullSecrets:
+      - name: dockerhub-secret
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: partitioned-msg-worker-2
+  namespace: whatsapp-webhook
+  labels:
+    app: partitioned-msg-worker
+    partition: "2"
+    version: v2-partitioned
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: partitioned-msg-worker
+      partition: "2"
+  template:
+    metadata:
+      labels:
+        app: partitioned-msg-worker
+        partition: "2"
+        version: v2-partitioned
+    spec:
+      containers:
+      - name: partitioned-msg-worker
+        image: cristianopluggerbi/webhook-worker:latest
+        imagePullPolicy: Always
+        args: ["python", "partitioned_message_worker.py"]
+        
+        env:
+        - name: PARTITION_ID
+          value: "2"
+        - name: DB_HOST
+          value: "10.0.10.69"
+        - name: DB_PORT
+          value: "6446"
+        - name: DB_NAME
+          value: "atendimento"
+        - name: DB_USER
+          value: "atendimento"
+        - name: DB_PASSWORD
+          value: "8/vLQv98vCmw%Ox1"
+        - name: DB_ENABLED
+          value: "True"
+        - name: RABBITMQ_HOST
+          value: "rabbitmq-service.whatsapp-webhook.svc.cluster.local"
+        - name: RABBITMQ_PORT
+          value: "5672"
+        - name: RABBITMQ_USER
+          valueFrom:
+            secretKeyRef:
+              name: rabbitmq-secret
+              key: username
+        - name: RABBITMQ_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: rabbitmq-secret
+              key: password
+        - name: RABBITMQ_ENABLED
+          value: "True"
+        - name: LOG_LEVEL
+          value: "INFO"
+        
+        resources:
+          requests:
+            memory: "32Mi"
+            cpu: "20m"
+          limits:
+            memory: "128Mi"
+            cpu: "200m"
+        
+        livenessProbe:
+          exec:
+            command:
+            - python
+            - -c
+            - "import sys; import os; sys.exit(0 if os.path.exists('/tmp/partitioned_message_worker.log') else 1)"
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          timeoutSeconds: 5
+          failureThreshold: 3
+        
+        readinessProbe:
+          exec:
+            command:
+            - /bin/sh
+            - -c
+            - "test -f /tmp/partitioned_message_worker.log && echo 'Worker ready'"
+          initialDelaySeconds: 20
+          periodSeconds: 15
+          timeoutSeconds: 5
+          failureThreshold: 3
+        
+        volumeMounts:
+        - name: tmp-logs
+          mountPath: /tmp
+      
+      volumes:
+      - name: tmp-logs
+        emptyDir:
+          sizeLimit: "50Mi"
+      
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        fsGroup: 1001
+      
+      restartPolicy: Always
+      
+      # Usar secret do Docker Hub para evitar rate limits
+      imagePullSecrets:
+      - name: dockerhub-secret
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: partitioned-msg-worker-3
+  namespace: whatsapp-webhook
+  labels:
+    app: partitioned-msg-worker
+    partition: "3"
+    version: v2-partitioned
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: partitioned-msg-worker
+      partition: "3"
+  template:
+    metadata:
+      labels:
+        app: partitioned-msg-worker
+        partition: "3"
+        version: v2-partitioned
+    spec:
+      containers:
+      - name: partitioned-msg-worker
+        image: cristianopluggerbi/webhook-worker:latest
+        imagePullPolicy: Always
+        args: ["python", "partitioned_message_worker.py"]
+        
+        env:
+        - name: PARTITION_ID
+          value: "3"
+        - name: DB_HOST
+          value: "10.0.10.69"
+        - name: DB_PORT
+          value: "6446"
+        - name: DB_NAME
+          value: "atendimento"
+        - name: DB_USER
+          value: "atendimento"
+        - name: DB_PASSWORD
+          value: "8/vLQv98vCmw%Ox1"
+        - name: DB_ENABLED
+          value: "True"
+        - name: RABBITMQ_HOST
+          value: "rabbitmq-service.whatsapp-webhook.svc.cluster.local"
+        - name: RABBITMQ_PORT
+          value: "5672"
+        - name: RABBITMQ_USER
+          valueFrom:
+            secretKeyRef:
+              name: rabbitmq-secret
+              key: username
+        - name: RABBITMQ_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: rabbitmq-secret
+              key: password
+        - name: RABBITMQ_ENABLED
+          value: "True"
+        - name: LOG_LEVEL
+          value: "INFO"
+        
+        resources:
+          requests:
+            memory: "32Mi"
+            cpu: "20m"
+          limits:
+            memory: "128Mi"
+            cpu: "200m"
+        
+        livenessProbe:
+          exec:
+            command:
+            - python
+            - -c
+            - "import sys; import os; sys.exit(0 if os.path.exists('/tmp/partitioned_message_worker.log') else 1)"
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          timeoutSeconds: 5
+          failureThreshold: 3
+        
+        readinessProbe:
+          exec:
+            command:
+            - /bin/sh
+            - -c
+            - "test -f /tmp/partitioned_message_worker.log && echo 'Worker ready'"
+          initialDelaySeconds: 20
+          periodSeconds: 15
+          timeoutSeconds: 5
+          failureThreshold: 3
+        
+        volumeMounts:
+        - name: tmp-logs
+          mountPath: /tmp
+      
+      volumes:
+      - name: tmp-logs
+        emptyDir:
+          sizeLimit: "50Mi"
+      
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        fsGroup: 1001
+      
+      restartPolicy: Always
+      
+      # Usar secret do Docker Hub para evitar rate limits
+      imagePullSecrets:
+      - name: dockerhub-secret

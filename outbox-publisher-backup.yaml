@@ -1,0 +1,154 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  annotations:
+    deployment.kubernetes.io/revision: "4"
+    kubectl.kubernetes.io/last-applied-configuration: |
+      {"apiVersion":"apps/v1","kind":"Deployment","metadata":{"annotations":{},"labels":{"app":"outbox-publisher","version":"v1"},"name":"outbox-publisher","namespace":"whatsapp-webhook"},"spec":{"replicas":1,"selector":{"matchLabels":{"app":"outbox-publisher"}},"template":{"metadata":{"labels":{"app":"outbox-publisher","version":"v1"}},"spec":{"affinity":{"nodeAffinity":{"preferredDuringSchedulingIgnoredDuringExecution":[{"preference":{"matchExpressions":[{"key":"node-role.kubernetes.io/worker","operator":"In","values":["true"]}]},"weight":100}]}},"containers":[{"args":["python","outbox_publisher.py"],"env":[{"name":"DB_HOST","value":"10.0.10.69"},{"name":"DB_PORT","value":"6446"},{"name":"DB_NAME","value":"atendimento"},{"name":"DB_USER","value":"atendimento"},{"name":"DB_PASSWORD","value":"8/vLQv98vCmw%Ox1"},{"name":"DB_ENABLED","value":"True"},{"name":"RABBITMQ_HOST","value":"rabbitmq-service.whatsapp-webhook.svc.cluster.local"},{"name":"RABBITMQ_PORT","value":"5672"},{"name":"RABBITMQ_USER","valueFrom":{"secretKeyRef":{"key":"username","name":"rabbitmq-secret"}}},{"name":"RABBITMQ_PASSWORD","valueFrom":{"secretKeyRef":{"key":"password","name":"rabbitmq-secret"}}},{"name":"RABBITMQ_ENABLED","value":"True"},{"name":"LOG_LEVEL","value":"INFO"}],"image":"cristianopluggerbi/webhook-worker:latest","imagePullPolicy":"Always","livenessProbe":{"exec":{"command":["python","-c","import sys; import os; sys.exit(0 if os.path.exists('/tmp/outbox_publisher.log') else 1)"]},"failureThreshold":3,"initialDelaySeconds":30,"periodSeconds":30,"timeoutSeconds":5},"name":"outbox-publisher","readinessProbe":{"exec":{"command":["/bin/sh","-c","test -f /tmp/outbox_publisher.log \u0026\u0026 echo 'Publisher ready'"]},"failureThreshold":3,"initialDelaySeconds":20,"periodSeconds":15,"timeoutSeconds":5},"resources":{"limits":{"cpu":"50m","memory":"32Mi"},"requests":{"cpu":"10m","memory":"16Mi"}},"volumeMounts":[{"mountPath":"/tmp","name":"tmp-logs"}]}],"imagePullSecrets":[{"name":"dockerhub-secret"}],"restartPolicy":"Always","securityContext":{"fsGroup":1001,"runAsGroup":1001,"runAsNonRoot":true,"runAsUser":1001},"volumes":[{"emptyDir":{"sizeLimit":"20Mi"},"name":"tmp-logs"}]}}}}
+  creationTimestamp: "2025-08-22T12:29:17Z"
+  generation: 10
+  labels:
+    app: outbox-publisher
+    version: v1
+  name: outbox-publisher
+  namespace: whatsapp-webhook
+  resourceVersion: "342187577"
+  uid: 831a1108-cceb-43e8-a9c3-3e7b339316da
+spec:
+  progressDeadlineSeconds: 600
+  replicas: 1
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: outbox-publisher
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    type: RollingUpdate
+  template:
+    metadata:
+      annotations:
+        kubectl.kubernetes.io/restartedAt: "2025-08-25T13:55:40-03:00"
+      creationTimestamp: null
+      labels:
+        app: outbox-publisher
+        version: v1
+    spec:
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - preference:
+              matchExpressions:
+              - key: node-role.kubernetes.io/worker
+                operator: In
+                values:
+                - "true"
+            weight: 100
+      containers:
+      - args:
+        - python
+        - outbox_publisher.py
+        env:
+        - name: DB_HOST
+          value: 10.0.10.69
+        - name: DB_PORT
+          value: "6446"
+        - name: DB_NAME
+          value: atendimento
+        - name: DB_USER
+          value: atendimento
+        - name: DB_PASSWORD
+          value: 8/vLQv98vCmw%Ox1
+        - name: DB_ENABLED
+          value: "True"
+        - name: RABBITMQ_HOST
+          value: rabbitmq-service.whatsapp-webhook.svc.cluster.local
+        - name: RABBITMQ_PORT
+          value: "5672"
+        - name: RABBITMQ_USER
+          valueFrom:
+            secretKeyRef:
+              key: username
+              name: rabbitmq-secret
+        - name: RABBITMQ_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              key: password
+              name: rabbitmq-secret
+        - name: RABBITMQ_ENABLED
+          value: "True"
+        - name: LOG_LEVEL
+          value: INFO
+        image: cristianopluggerbi/webhook-worker:latest
+        imagePullPolicy: Always
+        livenessProbe:
+          exec:
+            command:
+            - python
+            - -c
+            - import sys; import os; sys.exit(0 if os.path.exists('/tmp/outbox_publisher.log')
+              else 1)
+          failureThreshold: 3
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          successThreshold: 1
+          timeoutSeconds: 5
+        name: outbox-publisher
+        readinessProbe:
+          exec:
+            command:
+            - /bin/sh
+            - -c
+            - test -f /tmp/outbox_publisher.log && echo 'Publisher ready'
+          failureThreshold: 3
+          initialDelaySeconds: 20
+          periodSeconds: 15
+          successThreshold: 1
+          timeoutSeconds: 5
+        resources:
+          limits:
+            cpu: 50m
+            memory: 32Mi
+          requests:
+            cpu: 10m
+            memory: 16Mi
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - mountPath: /tmp
+          name: tmp-logs
+      dnsPolicy: ClusterFirst
+      imagePullSecrets:
+      - name: dockerhub-secret
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext:
+        fsGroup: 1001
+        runAsGroup: 1001
+        runAsNonRoot: true
+        runAsUser: 1001
+      terminationGracePeriodSeconds: 30
+      volumes:
+      - emptyDir:
+          sizeLimit: 20Mi
+        name: tmp-logs
+status:
+  availableReplicas: 1
+  conditions:
+  - lastTransitionTime: "2025-08-22T18:33:58Z"
+    lastUpdateTime: "2025-08-25T17:02:34Z"
+    message: ReplicaSet "outbox-publisher-89968c4f7" has successfully progressed.
+    reason: NewReplicaSetAvailable
+    status: "True"
+    type: Progressing
+  - lastTransitionTime: "2025-09-10T20:42:33Z"
+    lastUpdateTime: "2025-09-10T20:42:33Z"
+    message: Deployment has minimum availability.
+    reason: MinimumReplicasAvailable
+    status: "True"
+    type: Available
+  observedGeneration: 10
+  readyReplicas: 1
+  replicas: 1
+  updatedReplicas: 1

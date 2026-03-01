@@ -1,0 +1,120 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: outbox-publisher
+  namespace: whatsapp-webhook
+  labels:
+    app: outbox-publisher
+    version: v2-improved
+spec:
+  replicas: 1  # Apenas 1 replica para evitar processamento duplicado
+  selector:
+    matchLabels:
+      app: outbox-publisher
+  template:
+    metadata:
+      labels:
+        app: outbox-publisher
+        version: v2-improved
+    spec:
+      containers:
+      - name: outbox-publisher
+        # Usar a mesma imagem do webhook-worker
+        image: cristianopluggerbi/webhook-worker:latest
+        imagePullPolicy: Always
+        
+        # Comando para executar o outbox publisher
+        args: ["python", "outbox_publisher.py"]
+        
+        env:
+        - name: DB_HOST
+          value: "10.0.10.69"
+        - name: DB_PORT
+          value: "6446"
+        - name: DB_NAME
+          value: "atendimento"
+        - name: DB_USER
+          value: "atendimento"
+        - name: DB_PASSWORD
+          value: "8/vLQv98vCmw%Ox1"
+        - name: DB_ENABLED
+          value: "True"
+        - name: RABBITMQ_HOST
+          value: "rabbitmq-service.whatsapp-webhook.svc.cluster.local"
+        - name: RABBITMQ_PORT
+          value: "5672"
+        - name: RABBITMQ_USER
+          valueFrom:
+            secretKeyRef:
+              name: rabbitmq-secret
+              key: username
+        - name: RABBITMQ_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: rabbitmq-secret
+              key: password
+        - name: RABBITMQ_ENABLED
+          value: "True"
+        - name: LOG_LEVEL
+          value: "INFO"
+        
+        # Recursos otimizados
+        resources:
+          requests:
+            memory: "16Mi"
+            cpu: "10m"
+          limits:
+            memory: "32Mi"
+            cpu: "50m"
+        
+        # Health checks melhorados
+        livenessProbe:
+          exec:
+            command:
+            - python
+            - -c
+            - |
+              import sys
+              import os
+              import time
+              
+              log_file = '/tmp/outbox_publisher.log'
+              if not os.path.exists(log_file):
+                  sys.exit(1)
+              
+              # Verificar se o log foi atualizado recentemente (últimos 5 minutos)
+              stat = os.stat(log_file)
+              last_modified = stat.st_mtime
+              current_time = time.time()
+              
+              if current_time - last_modified > 300:  # 5 minutos
+                  sys.exit(1)
+              
+              sys.exit(0)
+          initialDelaySeconds: 60
+          periodSeconds: 60
+          timeoutSeconds: 10
+          failureThreshold: 3
+        
+        readinessProbe:
+          exec:
+            command:
+            - /bin/sh
+            - -c
+            - test -f /tmp/outbox_publisher.log && echo 'Publisher ready'
+          initialDelaySeconds: 20
+          periodSeconds: 15
+          timeoutSeconds: 5
+          failureThreshold: 3
+        
+        # Volume para logs
+        volumeMounts:
+        - name: tmp-logs
+          mountPath: /tmp
+      
+      volumes:
+      - name: tmp-logs
+        emptyDir: {}
+      
+      # Configurações de restart mais agressivas
+      restartPolicy: Always

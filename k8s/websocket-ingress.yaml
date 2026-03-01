@@ -17,10 +17,10 @@ metadata:
 spec:
   tls:
   - hosts:
-    - atendimento.pluggerbi.com
+    - pluggy.pluggerbi.com
     secretName: websocket-tls
   rules:
-  - host: atendimento.pluggerbi.com
+  - host: pluggy.pluggerbi.com
     http:
       paths:
       - path: /ws

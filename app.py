@@ -4,11 +4,14 @@ import json
 import logging
 import os
 from config import (
-    WEBHOOK_VERIFY_TOKEN, DEBUG, HOST, PORT, LOG_LEVEL, 
+    WEBHOOK_VERIFY_TOKEN, DEBUG, HOST, PORT, LOG_LEVEL,
     SSL_CERT_PATH, SSL_KEY_PATH, USE_SSL,
     DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD, DB_ENABLED,
     RABBITMQ_ENABLED, RABBITMQ_HOST, RABBITMQ_PORT,
-    SUPABASE_URL, SUPABASE_ANON_KEY, SUPABASE_JWKS_URL
+    SUPABASE_URL, SUPABASE_ANON_KEY, SUPABASE_JWKS_URL,
+    AUTH_BOOTSTRAP_SECRET, AUTH_REFRESH_TTL_SECONDS,
+    AUTH_JWT_ACCESS_TTL_SECONDS, AUTH_JWT_ISSUER, AUTH_JWT_AUDIENCE,
+    AUTH_ACCEPT_SUPABASE_TOKENS
 )
 from database import db_manager
 from rabbitmq_manager import rabbitmq_manager
@@ -17,11 +20,18 @@ import traceback
 import time
 import uuid
 import jwt
-from jwt import PyJWKClient
+from werkzeug.security import generate_password_hash, check_password_hash
+from datetime import timedelta
 import asyncio
 import threading
 from functools import wraps
 import requests
+from auth_utils import (
+    create_refresh_token,
+    hash_refresh_token,
+    issue_access_token,
+    validate_jwt_token,
+)
 
 # Configurar logging
 logging.basicConfig(level=getattr(logging, LOG_LEVEL))
@@ -30,119 +40,13 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 CORS(app)  # Permite acesso de outros domínios
 
-# Cache global para as chaves JWT
-jwks_client = None
-
-def get_jwks_client():
-    """
-    Obtém cliente JWKS do Supabase (com cache)
-    """
-    global jwks_client
-    
-    if jwks_client is None:
-        if not SUPABASE_JWKS_URL:
-            logger.error("❌ SUPABASE_JWKS_URL não configurado")
-            return None
-        
-        try:
-            logger.info(f"🔑 Criando cliente JWKS para: {SUPABASE_JWKS_URL}")
-            
-            # Criar cliente JWKS com configuração básica compatível
-            jwks_client = PyJWKClient(
-                SUPABASE_JWKS_URL,
-                cache_keys=True,
-                max_cached_keys=10
-            )
-            
-            logger.info(f"✅ Cliente JWKS criado com sucesso")
-            
-            # Testar o cliente imediatamente
-            test_response = requests.get(SUPABASE_JWKS_URL, timeout=5)
-            if test_response.status_code == 200:
-                jwks_data = test_response.json()
-                logger.info(f"✅ JWKS endpoint funcionando: {len(jwks_data.get('keys', []))} chaves encontradas")
-            else:
-                logger.warning(f"⚠️ JWKS endpoint retornou: {test_response.status_code}")
-                
-        except Exception as e:
-            logger.error(f"❌ Erro ao criar cliente JWKS: {e}")
-            logger.error(f"❌ Traceback: {traceback.format_exc()}")
-            return None
-    
-    return jwks_client
-
-def validate_jwt_token(token):
-    """
-    Valida token JWT do Supabase usando JWT Signing Keys (nova API)
-    """
+def _extract_bearer_token():
+    auth_header = request.headers.get("Authorization")
+    if not auth_header:
+        return None
     try:
-        if not SUPABASE_URL:
-            logger.error("❌ SUPABASE_URL não configurado")
-            return None
-        
-        # Obter cliente JWKS
-        client = get_jwks_client()
-        if not client:
-            return None
-        
-        # Obter cabeçalho do token para extrair kid (key ID)
-        try:
-            unverified_header = jwt.get_unverified_header(token)
-            algorithm = unverified_header.get('alg')
-            kid = unverified_header.get('kid')
-            logger.info(f"🔍 Token header: alg={algorithm}, kid={kid}")
-            
-            if not kid:
-                logger.warning("⚠️ Token JWT sem 'kid' no header")
-                return None
-        except Exception as e:
-            logger.error(f"❌ Erro ao extrair header do token: {e}")
-            return None
-        
-        # Buscar chave pública correspondente
-        try:
-            logger.info(f"🔍 Buscando chave pública para kid: {kid}")
-            signing_key = client.get_signing_key(kid)
-            public_key = signing_key.key
-            logger.info(f"✅ Chave pública obtida com sucesso")
-        except Exception as e:
-            logger.error(f"❌ Erro ao obter chave pública para kid '{kid}': {e}")
-            logger.error(f"❌ Traceback: {traceback.format_exc()}")
-            return None
-        
-        # Validar token com chave pública
-        try:
-            logger.info(f"🔐 Validando token com issuer: {SUPABASE_URL}/auth/v1")
-            payload = jwt.decode(
-                token,
-                public_key,
-                algorithms=['RS256', 'ES256'],  # Supabase usa RS256 ou ES256
-                audience='authenticated',
-                issuer=f"{SUPABASE_URL}/auth/v1"
-            )
-            
-            logger.info(f"✅ Token JWT válido para usuário: {payload.get('sub', 'unknown')}")
-            return payload
-            
-        except Exception as e:
-            logger.error(f"❌ Erro na validação da assinatura: {e}")
-            logger.error(f"❌ Traceback: {traceback.format_exc()}")
-            return None
-        
-    except jwt.ExpiredSignatureError:
-        logger.warning("⚠️ Token JWT expirado")
-        return None
-    except jwt.InvalidAudienceError:
-        logger.warning("⚠️ Token JWT com audience inválida")
-        return None
-    except jwt.InvalidIssuerError:
-        logger.warning("⚠️ Token JWT com issuer inválido")
-        return None
-    except jwt.InvalidTokenError as e:
-        logger.warning(f"⚠️ Token JWT inválido: {e}")
-        return None
-    except Exception as e:
-        logger.error(f"❌ Erro ao validar token JWT: {e}")
+        return auth_header.split(" ")[1]
+    except IndexError:
         return None
 
 def jwt_required(f):
@@ -151,26 +55,14 @@ def jwt_required(f):
     """
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        # Obter token do header Authorization
-        auth_header = request.headers.get('Authorization')
-        
-        if not auth_header:
+        token = _extract_bearer_token()
+        if not token:
             return jsonify({
                 "error": "Token de autorização é obrigatório",
                 "status": "error"
             }), 401
-        
-        # Extrair token (formato: "Bearer <token>")
-        try:
-            token = auth_header.split(' ')[1]
-        except IndexError:
-            return jsonify({
-                "error": "Formato de token inválido. Use: Bearer <token>",
-                "status": "error"
-            }), 401
-        
-        # Validar token
-        payload = validate_jwt_token(token)
+
+        payload = validate_jwt_token(token, required_type="access")
         if not payload:
             return jsonify({
                 "error": "Token inválido ou expirado",
@@ -349,6 +241,14 @@ def get_account_by_id(account_id):
                 "status": "error"
             }), 400
         
+        # Garantir isolamento por tenant: conta do token deve bater com a rota
+        token_account_id = get_account_id_from_token()
+        if token_account_id and token_account_id != account_id:
+            return jsonify({
+                "error": "Acesso negado para esta conta",
+                "status": "error"
+            }), 403
+
         # Buscar conta
         account = db_manager.get_account(account_id)
         
@@ -407,6 +307,229 @@ def get_account_id_from_token():
     except Exception as e:
         logger.error(f"❌ Erro ao extrair account_id do token: {e}")
         return None
+
+def get_user_name_by_id(user_id):
+    """
+    Busca o nome do usuário pelo user_id no MySQL (auth local)
+    """
+    try:
+        if not user_id:
+            return None
+        user = db_manager.get_user_by_id(user_id)
+        if not user:
+            return None
+        return user.get("full_name") or user.get("email")
+        
+    except Exception as e:
+        logger.error(f"❌ Erro ao buscar nome do usuário {user_id}: {e}")
+        return None
+
+
+# ==================== AUTH ENDPOINTS (LOCAL) ====================
+
+@app.route("/auth/login", methods=["POST"])
+def auth_login():
+    try:
+        if not db_manager.enabled:
+            return jsonify({"error": "Banco de dados não está habilitado", "status": "error"}), 503
+
+        data = request.get_json() or {}
+        email = (data.get("email") or "").strip().lower()
+        password = data.get("password") or ""
+
+        if not email or not password:
+            return jsonify({"error": "email e password são obrigatórios", "status": "error"}), 400
+
+        user = db_manager.get_user_by_email(email)
+        # Mensagem genérica para não vazar existência de usuário
+        if not user or not user.get("is_active"):
+            return jsonify({"error": "Credenciais inválidas", "status": "error"}), 401
+
+        if not check_password_hash(user["password_hash"], password):
+            return jsonify({"error": "Credenciais inválidas", "status": "error"}), 401
+
+        access_token = issue_access_token(
+            user_id=user["id"],
+            email=user["email"],
+            account_id=user.get("account_id"),
+            role=user.get("role") or "user",
+        )
+
+        refresh_token = create_refresh_token()
+        refresh_hash = hash_refresh_token(refresh_token)
+        expires_at = datetime.utcnow() + timedelta(seconds=AUTH_REFRESH_TTL_SECONDS)
+        db_manager.store_refresh_token(user["id"], refresh_hash, expires_at)
+        db_manager.update_user_last_login(user["id"])
+
+        return jsonify(
+            {
+                "status": "success",
+                "access_token": access_token,
+                "token_type": "Bearer",
+                "expires_in": AUTH_JWT_ACCESS_TTL_SECONDS,
+                "refresh_token": refresh_token,
+                "user": {
+                    "id": user["id"],
+                    "email": user["email"],
+                    "account_id": user.get("account_id"),
+                    "full_name": user.get("full_name"),
+                    "role": user.get("role") or "user",
+                },
+            }
+        ), 200
+    except Exception as e:
+        logger.error(f"❌ Erro no login: {e}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return jsonify({"error": "Erro interno do servidor", "status": "error"}), 500
+
+
+@app.route("/auth/refresh", methods=["POST"])
+def auth_refresh():
+    try:
+        if not db_manager.enabled:
+            return jsonify({"error": "Banco de dados não está habilitado", "status": "error"}), 503
+
+        data = request.get_json() or {}
+        refresh_token = data.get("refresh_token") or ""
+        if not refresh_token:
+            return jsonify({"error": "refresh_token é obrigatório", "status": "error"}), 400
+
+        token_hash = hash_refresh_token(refresh_token)
+        stored = db_manager.get_refresh_token_by_hash(token_hash)
+        if not stored or stored.get("revoked_at"):
+            return jsonify({"error": "Refresh token inválido", "status": "error"}), 401
+
+        # Expiração
+        expires_at = stored.get("expires_at")
+        if not expires_at or expires_at <= datetime.utcnow():
+            db_manager.revoke_refresh_token_by_hash(token_hash)
+            return jsonify({"error": "Refresh token expirado", "status": "error"}), 401
+
+        user = db_manager.get_user_by_id(stored["user_id"])
+        if not user or not user.get("is_active"):
+            return jsonify({"error": "Usuário inválido", "status": "error"}), 401
+
+        # Rotação: revogar o antigo e emitir um novo
+        db_manager.revoke_refresh_token_by_hash(token_hash)
+
+        new_refresh = create_refresh_token()
+        new_hash = hash_refresh_token(new_refresh)
+        new_expires = datetime.utcnow() + timedelta(seconds=AUTH_REFRESH_TTL_SECONDS)
+        db_manager.store_refresh_token(user["id"], new_hash, new_expires)
+
+        access_token = issue_access_token(
+            user_id=user["id"],
+            email=user["email"],
+            account_id=user.get("account_id"),
+            role=user.get("role") or "user",
+        )
+
+        return jsonify(
+            {
+                "status": "success",
+                "access_token": access_token,
+                "token_type": "Bearer",
+                "expires_in": AUTH_JWT_ACCESS_TTL_SECONDS,
+                "refresh_token": new_refresh,
+            }
+        ), 200
+
+    except Exception as e:
+        logger.error(f"❌ Erro no refresh: {e}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return jsonify({"error": "Erro interno do servidor", "status": "error"}), 500
+
+
+@app.route("/auth/logout", methods=["POST"])
+def auth_logout():
+    try:
+        if not db_manager.enabled:
+            return jsonify({"error": "Banco de dados não está habilitado", "status": "error"}), 503
+
+        data = request.get_json() or {}
+        refresh_token = data.get("refresh_token") or ""
+        if not refresh_token:
+            return jsonify({"error": "refresh_token é obrigatório", "status": "error"}), 400
+
+        token_hash = hash_refresh_token(refresh_token)
+        db_manager.revoke_refresh_token_by_hash(token_hash)
+        return jsonify({"status": "success", "message": "Logout realizado"}), 200
+    except Exception as e:
+        logger.error(f"❌ Erro no logout: {e}")
+        return jsonify({"error": "Erro interno do servidor", "status": "error"}), 500
+
+
+@app.route("/auth/me", methods=["GET"])
+@jwt_required
+def auth_me():
+    user_id = request.current_user.get("sub")
+    if not user_id:
+        return jsonify({"error": "Token inválido", "status": "error"}), 401
+    user = db_manager.get_user_by_id(user_id) if db_manager.enabled else None
+    return jsonify(
+        {
+            "status": "success",
+            "user": user
+            or {
+                "id": request.current_user.get("sub"),
+                "email": request.current_user.get("email"),
+                "account_id": request.current_user.get("account_id"),
+                "role": request.current_user.get("role", "user"),
+            },
+        }
+    ), 200
+
+
+@app.route("/auth/bootstrap/create-user", methods=["POST"])
+def auth_bootstrap_create_user():
+    """
+    Endpoint seguro para criar o primeiro(s) usuário(s).
+    Habilita somente se AUTH_BOOTSTRAP_SECRET estiver definido.
+    """
+    try:
+        if not AUTH_BOOTSTRAP_SECRET:
+            return jsonify({"error": "Endpoint desabilitado", "status": "error"}), 404
+
+        provided = request.headers.get("X-Bootstrap-Secret", "")
+        if not provided or provided != AUTH_BOOTSTRAP_SECRET:
+            return jsonify({"error": "Não autorizado", "status": "error"}), 403
+
+        if not db_manager.enabled:
+            return jsonify({"error": "Banco de dados não está habilitado", "status": "error"}), 503
+
+        data = request.get_json() or {}
+        email = (data.get("email") or "").strip().lower()
+        password = data.get("password") or ""
+        account_id = data.get("account_id")
+        full_name = data.get("full_name")
+        role = data.get("role") or "admin"
+
+        if not email or not password:
+            return jsonify({"error": "email e password são obrigatórios", "status": "error"}), 400
+
+        existing = db_manager.get_user_by_email(email)
+        if existing:
+            return jsonify({"error": "Usuário já existe", "status": "error"}), 409
+
+        user_id = str(uuid.uuid4())
+        password_hash = generate_password_hash(password)
+        ok = db_manager.insert_user(
+            user_id=user_id,
+            email=email,
+            password_hash=password_hash,
+            account_id=account_id,
+            full_name=full_name,
+            role=role,
+            is_active=True,
+        )
+        if not ok:
+            return jsonify({"error": "Falha ao criar usuário", "status": "error"}), 500
+
+        return jsonify({"status": "success", "user_id": user_id}), 201
+    except Exception as e:
+        logger.error(f"❌ Erro no bootstrap create-user: {e}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return jsonify({"error": "Erro interno do servidor", "status": "error"}), 500
 
 # ==================== CONVERSATIONS ENDPOINTS ====================
 
@@ -618,11 +741,18 @@ def send_message_to_conversation(conversation_id):
         
         message_content = data.get('content', '').strip()
         user_id = data.get('user_id')  # ID do usuário que está enviando
+        sender = data.get('sender')  # Sender do frontend (human/agent)
         
         if not message_content:
             return jsonify({
                 "success": False,
                 "error": "Campo 'content' é obrigatório e não pode estar vazio"
+            }), 400
+        
+        if not sender:
+            return jsonify({
+                "success": False,
+                "error": "Campo 'sender' é obrigatório"
             }), 400
         
         # Buscar account_id do token JWT
@@ -653,7 +783,7 @@ def send_message_to_conversation(conversation_id):
         message_id = db_manager.insert_conversation_message(
             conversation_id=conversation_id,
             message_text=message_content,
-            sender='agent',  # Mensagem de agente humano
+            sender=sender,  # Usar sender do frontend (human/agent)
             message_type='text',
             timestamp=datetime.now(),
             user_id=user_id,
@@ -666,17 +796,27 @@ def send_message_to_conversation(conversation_id):
                 "error": "Falha ao salvar mensagem no banco de dados"
             }), 500
         
-        # Buscar informações do bot para agent_name (para prefixo)
-        agent_name = None
+        # Determinar o nome para o prefixo baseado no sender
+        prefix_name = None
         try:
-            if conversation.get('channel_id'):
-                channel = db_manager.get_channel(conversation['channel_id'])
-                if channel and channel.get('bot_id'):
-                    bot = db_manager.get_bot(channel['bot_id'])
-                    if bot and bot.get('agent_name'):
-                        agent_name = bot['agent_name']
+            if sender == "human" and user_id:
+                # Se é humano, buscar nome do usuário pelo user_id
+                user_name = get_user_name_by_id(user_id)
+                prefix_name = user_name if user_name else "Atendente"
+                logger.info(f"💬 Mensagem de humano - user_id: {user_id}, nome: {prefix_name}")
+                
+            elif sender == "agent":
+                # Se é agent (bot), buscar agent_name do bot
+                if conversation.get('channel_id'):
+                    channel = db_manager.get_channel(conversation['channel_id'])
+                    if channel and channel.get('bot_id'):
+                        bot = db_manager.get_bot(channel['bot_id'])
+                        if bot and bot.get('agent_name'):
+                            prefix_name = bot['agent_name']
+                logger.info(f"🤖 Mensagem de bot - agent_name: {prefix_name}")
+                
         except Exception as e:
-            logger.warning(f"⚠️ Erro ao buscar agent_name: {e}")
+            logger.warning(f"⚠️ Erro ao buscar nome para prefixo: {e}")
         
         # Enviar mensagem para o canal (WhatsApp)
         send_success = False
@@ -692,8 +832,8 @@ def send_message_to_conversation(conversation_id):
                     "error": "Contato não tem número do WhatsApp configurado"
                 }), 400
             
-            # Enviar via WhatsApp (o prefixo será adicionado automaticamente)
-            result = whatsapp_service.process_outgoing_message(contact_phone, message_content, agent_name)
+            # Enviar via WhatsApp com o nome apropriado para o prefixo
+            result = whatsapp_service.process_outgoing_message(contact_phone, message_content, prefix_name)
             if result:
                 send_success = True
                 logger.info(f"✅ Mensagem enviada via WhatsApp para {contact_phone}")
@@ -1494,7 +1634,7 @@ def get_websocket_info():
         # URL correta baseada no ambiente
         if os.getenv('KUBERNETES_SERVICE_HOST'):
             # Em produção no Kubernetes, usar o domínio configurado
-            websocket_url = "wss://atendimento.pluggerbi.com/ws"  # HTTPS WebSocket
+            websocket_url = "wss://pluggyapi.pluggerbi.com/ws"  # HTTPS WebSocket
         else:
             # Em desenvolvimento local
             websocket_url = f"ws://localhost:8765"
@@ -5065,45 +5205,32 @@ def jwt_status():
     """
     try:
         status = {
-            "supabase_url_configured": bool(SUPABASE_URL),
-            "jwks_url": SUPABASE_JWKS_URL if SUPABASE_URL else "Não configurado",
-            "jwks_client_initialized": jwks_client is not None
+            "local_auth": {
+                "enabled": True,
+                "issuer": AUTH_JWT_ISSUER,
+                "audience": AUTH_JWT_AUDIENCE,
+                "access_ttl_seconds": AUTH_JWT_ACCESS_TTL_SECONDS,
+                "accept_supabase_tokens": AUTH_ACCEPT_SUPABASE_TOKENS,
+            },
+            "supabase_migration": {
+                "supabase_url_configured": bool(SUPABASE_URL),
+                "jwks_url": SUPABASE_JWKS_URL if SUPABASE_URL else "Não configurado",
+            },
         }
-        
-        # Tentar inicializar cliente se não foi feito ainda
-        if not jwks_client and SUPABASE_URL:
-            logger.info("🔄 Tentando inicializar cliente JWKS...")
-            test_client = get_jwks_client()
-            status["jwks_client_init_attempt"] = test_client is not None
-        
-        # Testar conectividade com JWKS (sem autenticação)
-        if SUPABASE_JWKS_URL:
+
+        # Se ainda estiver aceitando Supabase, validar conectividade do JWKS para troubleshooting
+        if AUTH_ACCEPT_SUPABASE_TOKENS and SUPABASE_JWKS_URL:
             try:
                 response = requests.get(SUPABASE_JWKS_URL, timeout=5)
-                status["jwks_endpoint_accessible"] = response.status_code == 200
+                status["supabase_migration"]["jwks_endpoint_accessible"] = response.status_code == 200
                 if response.status_code == 200:
                     jwks_data = response.json()
-                    keys = jwks_data.get('keys', [])
-                    status["jwks_keys_count"] = len(keys)
-                    
-                    # Mostrar detalhes das chaves disponíveis
-                    status["available_keys"] = []
-                    for key in keys:
-                        key_info = {
-                            "kid": key.get('kid'),
-                            "alg": key.get('alg'),
-                            "kty": key.get('kty'),
-                            "use": key.get('use')
-                        }
-                        status["available_keys"].append(key_info)
+                    status["supabase_migration"]["jwks_keys_count"] = len(jwks_data.get("keys", []))
                 else:
-                    status["jwks_error"] = f"HTTP {response.status_code}"
+                    status["supabase_migration"]["jwks_error"] = f"HTTP {response.status_code}"
             except Exception as e:
-                status["jwks_endpoint_accessible"] = False
-                status["jwks_error"] = str(e)
-        else:
-            status["jwks_endpoint_accessible"] = False
-            status["jwks_error"] = "URL não configurada"
+                status["supabase_migration"]["jwks_endpoint_accessible"] = False
+                status["supabase_migration"]["jwks_error"] = str(e)
         
         return jsonify({
             "status": "success",
@@ -5123,21 +5250,10 @@ def decode_jwt_info():
     Endpoint para debug: mostra informações do token JWT sem validá-lo
     """
     try:
-        # Obter token do header Authorization
-        auth_header = request.headers.get('Authorization')
-        
-        if not auth_header:
+        token = _extract_bearer_token()
+        if not token:
             return jsonify({
                 "error": "Token de autorização é obrigatório",
-                "status": "error"
-            }), 400
-        
-        # Extrair token (formato: "Bearer <token>")
-        try:
-            token = auth_header.split(' ')[1]
-        except IndexError:
-            return jsonify({
-                "error": "Formato de token inválido. Use: Bearer <token>",
                 "status": "error"
             }), 400
         
@@ -5458,21 +5574,68 @@ def webhook():
         
         logger.info(f"Webhook recebido: {json.dumps(body, indent=2)}")
         
-        # PRIORITÁRIO: Salvar no RabbitMQ (garante que não perde mensagem)
-        rabbitmq_saved = False
+        # OUTBOX PATTERN: Salvar no banco + outbox em transação atômica
+        outbox_saved = False
         try:
-            if rabbitmq_manager and rabbitmq_manager.enabled:
-                rabbitmq_saved = rabbitmq_manager.publish_webhook_event('webhook_received', body)
-                if rabbitmq_saved:
-                    logger.info("✅ Evento salvo no RabbitMQ com sucesso")
+            if db_manager and db_manager.enabled:
+                # Extrair message_id se disponível para rastreamento
+                message_id = None
+                if body.get('object') == 'whatsapp_business_account':
+                    for entry in body.get('entry', []):
+                        for change in entry.get('changes', []):
+                            value = change.get('value', {})
+                            if 'messages' in value and value['messages']:
+                                message_id = value['messages'][0].get('id')
+                                break
+                
+                # Verificar se há mensagens reais (não apenas status) antes de salvar no outbox
+                has_user_messages = False
+                logger.info(f"🔍 DEBUG: Verificando has_user_messages para body: {body}")
+                if 'entry' in body:
+                    for entry in body.get('entry', []):
+                        logger.info(f"🔍 DEBUG: Processando entry: {entry}")
+                        for change in entry.get('changes', []):
+                            logger.info(f"🔍 DEBUG: Processando change: {change}")
+                            messages = change.get('value', {}).get('messages')
+                            logger.info(f"🔍 DEBUG: Messages encontradas: {messages}")
+                            if messages:
+                                has_user_messages = True
+                                logger.info(f"🔍 DEBUG: has_user_messages = True!")
+                                break
+                        if has_user_messages:
+                            break
+                
+                logger.info(f"🔍 DEBUG: RESULTADO FINAL has_user_messages = {has_user_messages}")
+                
+                if has_user_messages:
+                    # Salvar atomicamente no banco + outbox apenas para mensagens de usuários
+                    outbox_saved = db_manager.save_webhook_with_outbox('webhook_received', body, message_id)
+                    if outbox_saved:
+                        logger.info("✅ Webhook com mensagens de usuário salvo no banco + outbox atomicamente")
+                    else:
+                        logger.warning("⚠️ Falha ao salvar webhook no outbox")
                 else:
-                    logger.warning("⚠️ Falha ao salvar evento no RabbitMQ")
+                    # Apenas status updates - salvar no banco mas não no outbox
+                    if db_manager and db_manager.enabled:
+                        try:
+                            db_manager.save_webhook_event('webhook_status_only', body)
+                            logger.info("📊 Webhook apenas com status salvo no banco (sem outbox)")
+                        except Exception as save_error:
+                            logger.warning(f"⚠️ Falha ao salvar webhook de status: {save_error}")
+                    else:
+                        logger.debug("📊 Webhook apenas com status - banco desabilitado")
             else:
-                logger.debug("RabbitMQ desabilitado - evento não salvo na fila")
-        except Exception as rabbitmq_error:
-            logger.error(f"❌ Erro crítico ao salvar no RabbitMQ: {rabbitmq_error}")
-        
-        # Não salva no banco aqui - será salvo pelo worker para evitar duplicação
+                logger.debug("Database desabilitado - webhook não salvo")
+        except Exception as outbox_error:
+            logger.error(f"❌ Erro crítico ao salvar no outbox: {outbox_error}")
+            # Fallback: tentar salvar direto no RabbitMQ como antes
+            try:
+                if rabbitmq_manager and rabbitmq_manager.enabled:
+                    rabbitmq_saved = rabbitmq_manager.publish_webhook_event('webhook_received', body)
+                    if rabbitmq_saved:
+                        logger.warning("⚠️ Fallback: Evento salvo diretamente no RabbitMQ")
+            except Exception as fallback_error:
+                logger.error(f"❌ Erro no fallback RabbitMQ: {fallback_error}")
         
         # Processa o webhook apenas se for válido
         webhook_processed = False
@@ -5613,7 +5776,7 @@ def start_oauth():
         
         # URL de redirect (deve ser configurada no app Facebook)
         # Usar domínio público configurado
-        redirect_uri = "https://atendimento.pluggerbi.com/bot/oauth/callback"
+        redirect_uri = "https://pluggyapi.pluggerbi.com/bot/oauth/callback"
         
         # Gerar URL OAuth
         oauth_url = whatsapp_service.get_oauth_url(redirect_uri)
@@ -5670,7 +5833,7 @@ def oauth_callback():
         
         # URL de redirect (deve ser a mesma usada no início)  
         # Usar domínio público configurado
-        redirect_uri = "https://atendimento.pluggerbi.com/bot/oauth/callback"
+        redirect_uri = "https://pluggyapi.pluggerbi.com/bot/oauth/callback"
         
         # Trocar código por token
         result = whatsapp_service.exchange_code_for_token(code, redirect_uri)
@@ -6558,8 +6721,8 @@ if __name__ == '__main__':
         logger.info("🐰 RabbitMQ desabilitado")
     
 @app.route('/api/conversations/search', methods=['POST'])
-@token_required
-def search_conversations(current_user):
+@jwt_required
+def search_conversations():
     """
     API para pesquisar conversas por termos nas mensagens
     """
@@ -6640,6 +6803,145 @@ def search_conversations(current_user):
         
     except Exception as e:
         logger.error(f"❌ Erro na pesquisa de conversas: {e}")
+        logger.error(f"❌ Traceback: {traceback.format_exc()}")
+        return jsonify({
+            "error": f"Erro interno: {str(e)}",
+            "status": "error"
+        }), 500
+
+@app.route('/api/conversations/recent', methods=['GET'])
+@jwt_required
+def get_recent_conversations():
+    """
+    API para buscar conversas recentes com contatos para carregamento inicial do frontend
+    Retorna as 50 conversas mais recentes (ativas e encerradas) com dados do contato
+    """
+    try:
+        # Verificar se o banco está habilitado
+        if not db_manager.enabled:
+            return jsonify({
+                "error": "Banco de dados não está habilitado",
+                "status": "error"
+            }), 503
+        
+        # Obter account_id do token JWT
+        account_id = get_account_id_from_token()
+        if not account_id:
+            return jsonify({
+                "error": "Token JWT não contém account_id válido",
+                "status": "error"
+            }), 400
+        
+        # Parâmetros opcionais
+        limit = request.args.get('limit', 50, type=int)
+        if limit > 100:
+            limit = 100  # Máximo de 100 conversas
+        
+        include_closed = request.args.get('include_closed', 'true').lower() == 'true'
+        
+        logger.info(f"📋 Buscando conversas recentes para account {account_id} (limit: {limit}, include_closed: {include_closed})")
+        
+        # Buscar conversas recentes com dados completos
+        def _get_recent_conversations_operation(connection):
+            cursor = connection.cursor(dictionary=True)
+            
+            # Construir filtro de status
+            status_filter = ""
+            if not include_closed:
+                status_filter = "AND c.status = 'active'"
+            
+            query = f"""
+                SELECT 
+                    c.id as conversation_id,
+                    c.contact_id,
+                    c.channel_id,
+                    c.status,
+                    c.status_attendance,
+                    c.started_at,
+                    c.ended_at,
+                    ct.name as contact_name,
+                    ct.whatsapp_phone_number as contact_phone,
+                    ct.email as contact_email,
+                    ch.name as channel_name,
+                    ch.type as channel_type,
+                    b.name as bot_name,
+                    b.agent_name as bot_agent_name,
+                    (SELECT COUNT(*) FROM conversation_message cm WHERE cm.conversation_id = c.id) as message_count,
+                    (SELECT cm.message_text FROM conversation_message cm WHERE cm.conversation_id = c.id ORDER BY cm.timestamp DESC LIMIT 1) as last_message,
+                    (SELECT cm.timestamp FROM conversation_message cm WHERE cm.conversation_id = c.id ORDER BY cm.timestamp DESC LIMIT 1) as last_message_time,
+                    (SELECT cm.sender FROM conversation_message cm WHERE cm.conversation_id = c.id ORDER BY cm.timestamp DESC LIMIT 1) as last_message_sender
+                FROM conversation c
+                LEFT JOIN contacts ct ON c.contact_id = ct.id
+                LEFT JOIN channels ch ON c.channel_id = ch.id
+                LEFT JOIN bots b ON ch.bot_id = b.id
+                WHERE ct.account_id = %s {status_filter}
+                ORDER BY COALESCE(c.ended_at, c.started_at) DESC
+                LIMIT %s
+            """
+            
+            cursor.execute(query, (account_id, limit))
+            conversations = cursor.fetchall()
+            cursor.close()
+            
+            # Formatar dados para o frontend
+            formatted_conversations = []
+            for conv in conversations:
+                # Formatar timestamps
+                started_at = conv['started_at'].isoformat() if conv['started_at'] else None
+                ended_at = conv['ended_at'].isoformat() if conv['ended_at'] else None
+                last_message_time = conv['last_message_time'].isoformat() if conv['last_message_time'] else None
+                
+                formatted_conv = {
+                    "conversation_id": conv['conversation_id'],
+                    "status": conv['status'],
+                    "status_attendance": conv['status_attendance'],
+                    "started_at": started_at,
+                    "ended_at": ended_at,
+                    "message_count": conv['message_count'] or 0,
+                    "last_message": {
+                        "text": conv['last_message'],
+                        "sender": conv['last_message_sender'],
+                        "timestamp": last_message_time
+                    } if conv['last_message'] else None,
+                    "contact": {
+                        "id": conv['contact_id'],
+                        "name": conv['contact_name'],
+                        "phone": conv['contact_phone'],
+                        "email": conv['contact_email']
+                    },
+                    "channel": {
+                        "id": conv['channel_id'],
+                        "name": conv['channel_name'],
+                        "type": conv['channel_type']
+                    },
+                    "bot": {
+                        "name": conv['bot_name'],
+                        "agent_name": conv['bot_agent_name']
+                    } if conv['bot_name'] else None
+                }
+                
+                formatted_conversations.append(formatted_conv)
+            
+            return formatted_conversations
+        
+        conversations = db_manager._execute_with_fresh_connection(_get_recent_conversations_operation)
+        
+        return jsonify({
+            "status": "success",
+            "data": {
+                "conversations": conversations,
+                "pagination": {
+                    "limit": limit,
+                    "total": len(conversations),
+                    "include_closed": include_closed
+                },
+                "account_id": account_id
+            }
+        })
+        
+    except Exception as e:
+        logger.error(f"❌ Erro ao buscar conversas recentes: {e}")
+        import traceback
         logger.error(f"❌ Traceback: {traceback.format_exc()}")
         return jsonify({
             "error": f"Erro interno: {str(e)}",

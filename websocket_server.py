@@ -8,13 +8,12 @@ import asyncio
 import websockets
 import json
 import logging
-import jwt
-from jwt import PyJWKClient
 from datetime import datetime
 import threading
 import time
-import requests
-from config import JWT_SECRET_KEY, SUPABASE_JWKS_URL
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import urllib.parse
+from auth_utils import validate_jwt_token
 
 # Importar database de forma opcional (não crítica para WebSocket)
 try:
@@ -32,170 +31,77 @@ except Exception as e:
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Cliente JWKS global (cache)
-jwks_client = None
+def validate_ws_token(token):
+    payload = validate_jwt_token(token, required_type="access")
+    return payload
 
-def get_jwks_client():
-    """
-    Obtém cliente JWKS do Supabase (com cache)
-    """
-    global jwks_client
+class NotificationHandler(BaseHTTPRequestHandler):
+    """Handler HTTP para receber notificações de mensagens"""
     
-    if jwks_client is None:
-        if not SUPABASE_JWKS_URL:
-            logger.error("❌ SUPABASE_JWKS_URL não configurado")
-            return None
-        
+    def do_POST(self):
         try:
-            logger.info(f"🔑 Criando cliente JWKS para: {SUPABASE_JWKS_URL}")
-            
-            # Criar cliente JWKS com configuração básica compatível
-            jwks_client = PyJWKClient(
-                SUPABASE_JWKS_URL,
-                cache_keys=True,
-                max_cached_keys=10
-            )
-            
-            logger.info(f"✅ Cliente JWKS criado com sucesso")
-            
-            # Testar o cliente imediatamente
-            test_response = requests.get(SUPABASE_JWKS_URL, timeout=5)
-            if test_response.status_code == 200:
-                jwks_data = test_response.json()
-                logger.info(f"✅ JWKS endpoint funcionando: {len(jwks_data.get('keys', []))} chaves encontradas")
+            if self.path == '/api/notify':
+                # Ler dados da requisição
+                content_length = int(self.headers['Content-Length'])
+                post_data = self.rfile.read(content_length)
+                data = json.loads(post_data.decode('utf-8'))
+                
+                conversation_id = data.get('conversation_id')
+                message_data = data.get('message_data')
+                
+                if not conversation_id or not message_data:
+                    self.send_response(400)
+                    self.send_header('Content-type', 'application/json')
+                    self.end_headers()
+                    self.wfile.write(json.dumps({"error": "Missing conversation_id or message_data"}).encode())
+                    return
+                
+                # Chamar o WebSocket server de forma async
+                def notify_async():
+                    try:
+                        import asyncio
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        
+                        # Chamar a função do WebSocket server
+                        success = loop.run_until_complete(
+                            websocket_server.handle_http_notification(conversation_id, message_data)
+                        )
+                        
+                        loop.close()
+                        
+                        if success:
+                            logger.info(f"✅ HTTP-NOTIFY: Notificação processada para conversa {conversation_id}")
+                        else:
+                            logger.error(f"❌ HTTP-NOTIFY: Falha ao processar notificação para conversa {conversation_id}")
+                            
+                    except Exception as notify_error:
+                        logger.error(f"❌ HTTP-NOTIFY: Erro na notificação: {notify_error}")
+                
+                # Executar em thread separada
+                thread = threading.Thread(target=notify_async, daemon=True)
+                thread.start()
+                
+                # Responder sucesso imediatamente
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({"status": "success"}).encode())
+                
             else:
-                logger.warning(f"⚠️ JWKS endpoint retornou: {test_response.status_code}")
+                self.send_response(404)
+                self.end_headers()
                 
         except Exception as e:
-            logger.error(f"❌ Erro ao criar cliente JWKS: {e}")
-            return None
+            logger.error(f"❌ HTTP-NOTIFY: Erro no handler: {e}")
+            self.send_response(500)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({"status": "error", "message": str(e)}).encode())
     
-    return jwks_client
-
-def validate_jwt_token(token):
-    """
-    Valida token JWT do Supabase usando JWT Signing Keys (nova API)
-    """
-    try:
-        logger.info(f"🔐 Iniciando validação JWT para token: {token[:30]}...")
-        
-        if not token:
-            logger.error("❌ Token JWT está vazio ou None")
-            return None
-            
-        if not isinstance(token, str):
-            logger.error(f"❌ Token JWT não é string: {type(token)}")
-            return None
-        
-        if not SUPABASE_JWKS_URL:
-            logger.error("❌ SUPABASE_JWKS_URL não configurado")
-            return None
-        
-        logger.info(f"🔗 SUPABASE_JWKS_URL configurado: {SUPABASE_JWKS_URL}")
-        
-        # Obter cliente JWKS
-        client = get_jwks_client()
-        if not client:
-            logger.error("❌ Falha ao obter cliente JWKS")
-            return None
-        
-        # Obter cabeçalho do token para extrair kid (key ID)
-        try:
-            unverified_header = jwt.get_unverified_header(token)
-            algorithm = unverified_header.get('alg')
-            kid = unverified_header.get('kid')
-            typ = unverified_header.get('typ')
-            logger.info(f"🔍 Token header: alg={algorithm}, kid={kid}, typ={typ}")
-            logger.info(f"🔍 Header completo: {unverified_header}")
-            
-            if not kid:
-                logger.warning("⚠️ Token JWT sem 'kid' no header")
-                return None
-        except Exception as e:
-            logger.error(f"❌ Erro ao extrair header do token: {e}")
-            logger.error(f"❌ Token problematico: {token[:100]}...")
-            return None
-        
-        # Buscar chave pública correspondente
-        try:
-            logger.info(f"🔍 Buscando chave pública para kid: {kid}")
-            signing_key = client.get_signing_key(kid)
-            public_key = signing_key.key
-            logger.info(f"✅ Chave pública obtida com sucesso")
-        except Exception as e:
-            logger.error(f"❌ Erro ao obter chave pública para kid '{kid}': {e}")
-            return None
-        
-        # Validar token com chave pública - TENTATIVA SEM VALIDAÇÃO DE AUDIENCE/ISSUER PRIMEIRO
-        try:
-            logger.info(f"🔐 Tentando validação simples primeiro...")
-            
-            # Primeira tentativa: sem audience/issuer para debug
-            payload_simple = jwt.decode(
-                token,
-                public_key,
-                algorithms=['RS256', 'ES256', 'HS256'],  # Incluir HS256 também
-                options={"verify_aud": False, "verify_iss": False}
-            )
-            
-            logger.info(f"✅ Token decodificado com sucesso (validação simples)")
-            logger.info(f"🔍 Claims encontrados: {list(payload_simple.keys())}")
-            logger.info(f"🔍 Audience (aud): {payload_simple.get('aud')}")
-            logger.info(f"🔍 Issuer (iss): {payload_simple.get('iss')}")
-            logger.info(f"🔍 Algorithm usado: {algorithm}")
-            
-            # Agora tentar com validação completa usando os valores reais
-            actual_issuer = payload_simple.get('iss')
-            actual_audience = payload_simple.get('aud')
-            
-            if actual_issuer and actual_audience:
-                logger.info(f"🔐 Tentando validação completa com aud={actual_audience}, iss={actual_issuer}")
-                payload = jwt.decode(
-                    token,
-                    public_key,
-                    algorithms=[algorithm],
-                    audience=actual_audience,
-                    issuer=actual_issuer
-                )
-                logger.info(f"✅ Token JWT totalmente válido para usuário: {payload.get('sub', 'unknown')}")
-                return payload
-            else:
-                logger.warning("⚠️ Token sem audience/issuer, usando validação simples")
-                return payload_simple
-                
-        except jwt.ExpiredSignatureError:
-            logger.warning("⚠️ Token JWT expirado")
-            return None
-        except jwt.InvalidAudienceError as e:
-            logger.warning(f"⚠️ Token JWT com audience inválida: {e}")
-            return None
-        except jwt.InvalidIssuerError as e:
-            logger.warning(f"⚠️ Token JWT com issuer inválido: {e}")
-            return None
-        except jwt.InvalidTokenError as e:
-            logger.warning(f"⚠️ Token JWT inválido: {e}")
-            return None
-        except Exception as e:
-            logger.error(f"❌ Erro na validação da assinatura: {e}")
-            return None
-        
-    except jwt.ExpiredSignatureError:
-        logger.warning("⚠️ Token JWT expirado")
-        return None
-    except jwt.InvalidAudienceError as e:
-        logger.warning(f"⚠️ Token JWT com audience inválida: {e}")
-        return None
-    except jwt.InvalidIssuerError as e:
-        logger.warning(f"⚠️ Token JWT com issuer inválido: {e}")
-        return None
-    except jwt.InvalidTokenError as e:
-        logger.warning(f"⚠️ Token JWT inválido: {e}")
-        return None
-    except Exception as e:
-        logger.error(f"❌ Erro ao validar token JWT: {e}")
-        import traceback
-        logger.error(f"❌ Traceback: {traceback.format_exc()}")
-        return None
+    def log_message(self, format, *args):
+        # Suprimir logs do HTTPServer
+        pass
 
 class WebSocketServer:
     def __init__(self, host="0.0.0.0", port=8765):
@@ -276,6 +182,21 @@ class WebSocketServer:
             logger.error(f"❌ Traceback: {traceback.format_exc()}")
             return {"valid": False, "error": "Erro interno na autenticação"}
     
+    async def handle_http_notification(self, conversation_id, message_data):
+        """Processa notificações HTTP de mensagens dos workers"""
+        try:
+            logger.info(f"🌐 HTTP-NOTIFY: Recebida notificação para conversa {conversation_id}")
+            
+            # Chamar broadcast_message diretamente
+            await self.broadcast_message(conversation_id, message_data)
+            
+            logger.info(f"✅ HTTP-NOTIFY: Notificação processada para conversa {conversation_id}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ HTTP-NOTIFY: Erro ao processar notificação: {e}")
+            return False
+
     async def handle_client_message(self, websocket, message, client_id):
         """Processa mensagens do cliente"""
         try:
@@ -396,7 +317,7 @@ class WebSocketServer:
                 message_data = data.get("data", {})
                 conversation_id_raw = message_data.get("conversation_id")
                 content = message_data.get("content", "").strip()
-                sender = message_data.get("sender", "agent")
+                sender = message_data.get("sender")  # Usar exatamente o que o frontend envia
                 user_id = message_data.get("user_id")  # NOVO: Campo user_id
                 
                 logger.info(f"📤 Cliente {client_id} quer enviar mensagem: conversation_id={conversation_id_raw}, content='{content[:50]}...', sender={sender}, user_id={user_id}")
@@ -405,6 +326,13 @@ class WebSocketServer:
                     await websocket.send(json.dumps({
                         "type": "error",
                         "error": "conversation_id e content são obrigatórios para send_message"
+                    }))
+                    return
+                
+                if not sender:
+                    await websocket.send(json.dumps({
+                        "type": "error",
+                        "error": "sender é obrigatório para send_message"
                     }))
                     return
                 
@@ -539,7 +467,11 @@ class WebSocketServer:
     
     async def broadcast_message(self, conversation_id, message_data):
         """Envia mensagem para clientes interessados"""
+        logger.info(f"🔍 BROADCAST-DEBUG: Iniciando broadcast para conversa {conversation_id}")
+        logger.info(f"🔍 BROADCAST-DEBUG: Total de clientes conectados: {len(self.clients)}")
+        
         if not self.clients:
+            logger.warning(f"⚠️ BROADCAST-DEBUG: Nenhum cliente conectado")
             return
         
         message_payload = {
@@ -552,9 +484,19 @@ class WebSocketServer:
         # Encontrar clientes interessados nesta conversa
         interested_clients = []
         for client_id, client_info in self.clients.items():
+            logger.info(f"🔍 BROADCAST-DEBUG: Cliente {client_id} - conversations: {client_info['conversations']}")
+            
             if (not client_info["conversations"] or  # Se não especificou conversas, recebe todas
                 conversation_id in client_info["conversations"]):
                 interested_clients.append(client_id)
+                logger.info(f"✅ BROADCAST-DEBUG: Cliente {client_id} interessado na conversa {conversation_id}")
+            else:
+                logger.info(f"❌ BROADCAST-DEBUG: Cliente {client_id} NÃO interessado na conversa {conversation_id}")
+        
+        logger.info(f"🔍 BROADCAST-DEBUG: Total de clientes interessados: {len(interested_clients)}")
+        
+        # Verificar se é uma nova conversa (primeira mensagem) para fazer refresh
+        should_refresh_new_conversation = await self._is_new_conversation(conversation_id)
         
         # Enviar para clientes interessados
         if interested_clients:
@@ -570,6 +512,13 @@ class WebSocketServer:
             
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
+        else:
+            logger.warning(f"⚠️ BROADCAST-DEBUG: Nenhum cliente interessado na conversa {conversation_id}")
+        
+        # Se é uma nova conversa, sempre fazer refresh para clientes com conversas específicas
+        if should_refresh_new_conversation:
+            logger.info(f"🔄 BROADCAST-DEBUG: Nova conversa {conversation_id} detectada - fazendo refresh para todos os clientes")
+            await self.refresh_conversations_for_new_conversation(conversation_id)
     
     async def _send_to_client(self, websocket, message_payload, client_id):
         """Envia mensagem para um cliente específico"""
@@ -580,6 +529,100 @@ class WebSocketServer:
             await self.unregister_client(client_id)
         except Exception as e:
             logger.error(f"❌ Erro ao enviar para cliente {client_id}: {e}")
+    
+    async def _is_new_conversation(self, conversation_id):
+        """Verifica se é uma nova conversa (poucas mensagens)"""
+        try:
+            if not DB_AVAILABLE or not db_manager:
+                return False
+                
+            def _count_messages_operation(connection):
+                cursor = connection.cursor()
+                query = "SELECT COUNT(*) FROM conversation_message WHERE conversation_id = %s"
+                cursor.execute(query, (conversation_id,))
+                count = cursor.fetchone()[0]
+                cursor.close()
+                return count
+            
+            message_count = db_manager._execute_with_fresh_connection(_count_messages_operation)
+            
+            # Consideramos nova conversa se tem 2 mensagens ou menos (user + primeira resposta bot)
+            is_new = message_count <= 2
+            logger.info(f"🔍 NEW-CONV-DEBUG: Conversa {conversation_id} tem {message_count} mensagens - é nova: {is_new}")
+            return is_new
+            
+        except Exception as e:
+            logger.error(f"❌ Erro ao verificar se conversa {conversation_id} é nova: {e}")
+            return False
+    
+    async def refresh_conversations_for_new_conversation(self, conversation_id):
+        """Atualiza lista de conversas para clientes que usam [] (todas as conversas)"""
+        try:
+            # Buscar informações da conversa nova
+            if not DB_AVAILABLE or not db_manager:
+                return
+                
+            def _get_conversation_account_operation(connection):
+                cursor = connection.cursor(dictionary=True)
+                query = """
+                    SELECT c.id, ct.account_id 
+                    FROM conversation c
+                    LEFT JOIN contacts ct ON c.contact_id = ct.id
+                    WHERE c.id = %s AND c.status = 'active'
+                """
+                cursor.execute(query, (conversation_id,))
+                result = cursor.fetchone()
+                cursor.close()
+                return result
+            
+            conversation_info = db_manager._execute_with_fresh_connection(_get_conversation_account_operation)
+            
+            if not conversation_info:
+                logger.debug(f"🔍 Conversa {conversation_id} não encontrada ou não é ativa")
+                return
+                
+            account_id = conversation_info['account_id']
+            logger.info(f"🔄 REFRESH-DEBUG: Nova conversa {conversation_id} para account {account_id}")
+            
+            # Atualizar clientes que monitoram todas as conversas (lista vazia)
+            clients_to_update = []
+            for client_id, client_info in self.clients.items():
+                if (client_info.get("account_id") == account_id and 
+                    not client_info.get("conversations")):  # Lista vazia = todas as conversas
+                    clients_to_update.append(client_id)
+            
+            if clients_to_update:
+                logger.info(f"🔄 REFRESH-DEBUG: Atualizando {len(clients_to_update)} clientes")
+                
+                # Buscar conversas atualizadas
+                conversations = await self.get_account_conversations(account_id)
+                conversation_ids = [conv["id"] for conv in conversations]
+                
+                # Notificar cada cliente
+                for client_id in clients_to_update:
+                    client_info = self.clients.get(client_id)
+                    if client_info:
+                        # Atualizar lista no cliente
+                        self.clients[client_id]["conversations"] = conversation_ids
+                        
+                        # Enviar notificação
+                        update_payload = {
+                            "type": "subscription_updated",
+                            "conversation_ids": conversation_ids,
+                            "data": {
+                                "conversations": conversations,
+                                "new_conversation_id": conversation_id
+                            },
+                            "timestamp": datetime.now().isoformat()
+                        }
+                        
+                        await self._send_to_client(client_info["websocket"], update_payload, client_id)
+                        logger.info(f"✅ REFRESH-DEBUG: Cliente {client_id} atualizado com nova conversa {conversation_id}")
+            else:
+                logger.debug(f"🔍 REFRESH-DEBUG: Nenhum cliente para atualizar")
+                
+        except Exception as e:
+            logger.error(f"❌ Erro ao atualizar conversas para nova conversa {conversation_id}: {e}")
     
     async def get_account_conversations(self, account_id):
         """Busca todas as conversas de um account"""
@@ -620,7 +663,8 @@ class WebSocketServer:
                     LEFT JOIN contacts ct ON c.contact_id = ct.id
                     LEFT JOIN channels ch ON c.channel_id = ch.id
                     LEFT JOIN bots b ON ch.bot_id = b.id
-                    WHERE ct.account_id = %s
+                    WHERE ct.account_id = %s 
+                      AND c.status = 'active'
                     ORDER BY c.started_at DESC
                     LIMIT 100
                 """
@@ -722,6 +766,7 @@ class WebSocketServer:
                         cm.timestamp,
                         cm.prompt,
                         cm.tokens,
+                        cm.user_id,
                         b.name as bot_name,
                         b.agent_name as bot_agent_name
                     FROM conversation_message cm
@@ -743,11 +788,12 @@ class WebSocketServer:
                         "id": msg["id"],
                         "conversation_id": msg["conversation_id"],
                         "content": msg["message_text"],  # Padronizar para 'content'
-                        "sender": self._normalize_sender_value(msg["sender"]),  # Padronizar valores
+                        "sender": msg["sender"],  # Usar valor original da tabela (user/agent/human)
                         "timestamp": msg["timestamp"].isoformat() if msg.get("timestamp") else None,
                         "channel": "whatsapp",
                         "message_type": msg["message_type"],
                         "tokens": msg.get("tokens", 0),
+                        "user_id": msg.get("user_id"),  # Incluir user_id (null se não existir)
                         "metadata": {
                             "bot": {
                                 "name": msg.get("bot_name"),
@@ -956,5 +1002,42 @@ def notify_new_message_sync(conversation_id, message_data):
         import traceback
         logger.error(f"❌ Traceback: {traceback.format_exc()}")
 
+def start_http_server():
+    """Inicia servidor HTTP para receber notificações em thread separada"""
+    try:
+        server = HTTPServer(('0.0.0.0', 8765), NotificationHandler)
+        logger.info(f"✅ Servidor HTTP iniciado na porta 8765 para notificações")
+        server.serve_forever()
+    except Exception as e:
+        logger.error(f"❌ Erro no servidor HTTP: {e}")
+        import traceback
+        logger.error(f"❌ Traceback HTTP: {traceback.format_exc()}")
+
+async def start_websocket_and_http():
+    """Inicia WebSocket server e HTTP server em paralelo"""
+    global websocket_server
+    
+    try:
+        logger.info("🚀 Iniciando servidores HTTP (8765) e WebSocket (8766)")
+        
+        # Iniciar servidor HTTP em thread separada
+        http_thread = threading.Thread(target=start_http_server, daemon=True)
+        http_thread.start()
+        logger.info("🌐 Servidor HTTP iniciado em thread separada")
+        
+        # Aguardar um pouco para o HTTP server iniciar
+        await asyncio.sleep(2)
+        
+        # Recriar instância do WebSocket server com porta 8766
+        websocket_server = WebSocketServer(host="0.0.0.0", port=8766)
+        logger.info(f"🔌 Iniciando WebSocket server na porta {websocket_server.port}...")
+        await websocket_server.start_server()
+        
+    except Exception as e:
+        logger.error(f"❌ Erro ao iniciar servidores: {e}")
+        import traceback
+        logger.error(f"❌ Traceback: {traceback.format_exc()}")
+        raise
+
 if __name__ == "__main__":
-    asyncio.run(websocket_server.start_server())
+    asyncio.run(start_websocket_and_http())

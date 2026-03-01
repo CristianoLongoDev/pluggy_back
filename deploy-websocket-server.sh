@@ -111,7 +111,7 @@ spec:
         - name: DB_ENABLED
           value: "True"
         - name: JWT_SECRET_KEY
-          value: "your-secret-key-here"
+          value: "websocket-default-secret-key-change-in-production"
         - name: SUPABASE_URL
           valueFrom:
             secretKeyRef:
@@ -169,7 +169,7 @@ if [ $? -eq 0 ]; then
     kubectl get pods -n whatsapp-webhook -l app=websocket-server
     echo ""
     echo -e "${GREEN}🌐 Para conectar o frontend:${NC}"
-    echo -e "${YELLOW}   URL: wss://atendimento.pluggerbi.com/ws${NC}"
+    echo -e "${YELLOW}   URL: wss://pluggyapi.pluggerbi.com/ws${NC}"
     echo -e "${YELLOW}   Porta: 443 (HTTPS)${NC}"
     echo -e "${YELLOW}   Autenticação: JWT Token required${NC}"
     echo ""

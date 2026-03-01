@@ -238,12 +238,29 @@ class ChatGPTService:
             if success:
                 logger.info(f"Email {email} salvo com sucesso para contato {contact_id}")
                 
-                # Verificar se o bot tem integração com Movidesk antes de integrar
-                integration_type = self._get_bot_integration_type(contact_id)
+                # Verificar se email foi realmente salvo (debug para cache/sync issues)
+                import time
+                time.sleep(0.1)  # Small delay para garantir commit da transação
+                fresh_contact_check = db_manager.get_contact(contact_id)
+                if fresh_contact_check and fresh_contact_check.get('email'):
+                    logger.info(f"🔍 DEBUG-EMAIL: Verificação pós-save OK - email '{fresh_contact_check.get('email')}' confirmado no banco")
+                else:
+                    logger.warning(f"⚠️ DEBUG-EMAIL: PROBLEMA - email não encontrado no banco após save para contato {contact_id}")
+                    logger.warning(f"⚠️ DEBUG-EMAIL: Dados do contato: {fresh_contact_check}")
+            else:
+                logger.error(f"❌ Erro ao salvar email {email} para contato {contact_id}")
+                return {
+                    "success": False,
+                    "error": "Falha ao salvar email no banco",
+                    "raw_data": result
+                }
                 
-                if integration_type == 'movidesk':
+            # Verificar se o bot tem integração com Movidesk antes de integrar
+            integration_type = self._get_bot_integration_type(contact_id)
+            
+            if integration_type == 'movidesk':
                 # Integração com Movidesk - buscar ou criar pessoa
-                    logger.info(f"🔗 INICIANDO integração Movidesk para {email} (bot com integração movidesk)")
+                logger.info(f"🔗 INICIANDO integração Movidesk para {email} (bot com integração movidesk)")
                 try:
                     from movidesk_service import movidesk_service
                     logger.info(f"🔗 Movidesk service importado com sucesso")
@@ -299,30 +316,48 @@ class ChatGPTService:
                         function_message = f"Email do usuario registrado: {email}"
                         tokens_used = result.get('usage', {}).get('total_tokens', 0) if result else 0
                         
-                        success_save = db_manager.insert_conversation_message(
-                            conversation_id=conversation['id'],
-                            message_text=function_message,
-                            sender='function',  # Tipo especial para contexto apenas
-                            message_type='function_result',
-                            timestamp=datetime.now(),
-                            tokens=tokens_used
-                        )
+                        # PROTEÇÃO: Verificar se a mesma mensagem já foi salva recentemente
+                        recent_messages = db_manager.get_conversation_messages(conversation['id'], limit=3)
+                        duplicate_found = False
                         
-                        if success_save:
-                            logger.info(f"💾 Mensagem de função salva para contexto: {function_message}")
+                        if recent_messages:
+                            for recent_msg in recent_messages:
+                                if (recent_msg.get('sender') == 'function' and 
+                                    recent_msg.get('message_text') == function_message):
+                                    logger.warning(f"⚠️ DUPLICAÇÃO DETECTADA: Mensagem de função já existe - pulando save")
+                                    duplicate_found = True
+                                    break
+                        
+                        if not duplicate_found:
+                            success_save = db_manager.insert_conversation_message(
+                                conversation_id=conversation['id'],
+                                message_text=function_message,
+                                sender='function',  # Tipo especial para contexto apenas
+                                message_type='function_result',
+                                timestamp=datetime.now(),
+                                tokens=tokens_used
+                            )
+                            
+                            if success_save:
+                                logger.info(f"💾 Mensagem de função salva para contexto: {function_message}")
+                            else:
+                                logger.warning(f"⚠️ Falha ao salvar mensagem de função")
                         else:
-                            logger.warning(f"⚠️ Falha ao salvar mensagem de função")
+                            logger.info(f"⏭️ Mensagem de função já existe - não duplicando")
                 except Exception as save_error:
                     logger.error(f"❌ Erro ao salvar mensagem de função: {save_error}")
                 
-                # Retornar sem resposta para registro completamente silencioso
+                # Marcar como executada para evitar loop, mas sem resposta para permitir continuação natural
+                logger.info(f"📧 Email registrado com sucesso - marcando como executada para evitar loop")
+                
                 return {
                         "success": True,
-                    "response": None,  # Nenhuma mensagem - registro totalmente silencioso
+                    "response": "",  # Resposta vazia - não envia mensagem mas sinaliza execução
                         "raw_data": result,
                     "tokens_used": result.get('usage', {}).get('total_tokens', 0) if result else 0,
-                    "function_executed": False,  # IMPORTANTE: False = ChatGPT continua a conversa
-                    "email_registered": email
+                    "function_executed": True,  # IMPORTANTE: True = função executada, evita loop
+                    "email_registered": email,
+                    "continue_conversation": True  # Flag especial para continuar conversa
                     }
             else:
                 logger.error(f"Erro ao salvar email no banco para {contact_id}")

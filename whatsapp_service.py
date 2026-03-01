@@ -362,15 +362,17 @@ class WhatsAppService:
         """Processa envio de mensagem e salva resultado no banco"""
         logger.info(f"Processando envio para {contact_id}: {message_text[:50]}...")
         
-        # Enviar mensagem (o send_text_message já adiciona o prefixo automaticamente)
-        result = self.send_text_message(contact_id, message_text)
-        
-        # Criar mensagem com prefixo para salvar no banco (igual ao que foi enviado)
-        # Usar agent_name se fornecido, senão usar padrão legacy
+        # Criar mensagem com prefixo para envio ao WhatsApp
         if agent_name:
-            prefixed_message = f"*{agent_name}:*\n{message_text}"
+            message_with_prefix = f"*{agent_name}:*\n{message_text}"
         else:
-            prefixed_message = f"*Plugger Assistente:*\n{message_text}"
+            message_with_prefix = f"*Plugger Assistente:*\n{message_text}"
+        
+        # Enviar mensagem COM prefixo via WhatsApp
+        result = self.send_text_message(contact_id, message_with_prefix)
+        
+        # Para salvar no banco, usar a mensagem SEM prefixo (mensagem original)
+        # O prefixo é apenas para exibição no WhatsApp, não deve ser salvo no banco
         
         if result["success"]:
             # Salvar como message_sent (confirmado) no banco
@@ -381,7 +383,7 @@ class WhatsAppService:
                         "type": "text",
                         "from": "bot",
                         "to": contact_id,
-                        "text": prefixed_message,  # Salvar com prefixo
+                        "text": message_text,  # Salvar SEM prefixo (mensagem original)
                         "message_id": result.get("message_id"),
                         "status": "sent",
                         "whatsapp_raw": result.get("raw_response")
@@ -405,7 +407,7 @@ class WhatsAppService:
                         "type": "text",
                         "from": "bot",
                         "to": contact_id,
-                        "text": prefixed_message,  # Salvar com prefixo mesmo na falha
+                        "text": message_text,  # Salvar SEM prefixo (mensagem original)
                         "status": "failed",
                         "error": result.get("error"),
                         "whatsapp_raw": result.get("raw_response")

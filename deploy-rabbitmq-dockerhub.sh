@@ -142,6 +142,41 @@ kubectl get pods -n ${NAMESPACE} -l app=rabbitmq --no-headers | head -1 | while 
     fi
 done
 
+# === NOVO: CONFIGURAR PLUGINS NECESSÁRIOS ===
+echo ""
+echo -e "${BLUE}🔌 Habilitando plugins necessários...${NC}"
+
+# Aguardar RabbitMQ estar completamente pronto
+echo -e "${YELLOW}⏳ Aguardando RabbitMQ estar completamente pronto...${NC}"
+sleep 20
+
+# Obter nome do pod RabbitMQ
+RABBITMQ_POD=$(kubectl get pods -n ${NAMESPACE} -l app=rabbitmq --no-headers -o custom-columns=":metadata.name" | head -1)
+
+if [ ! -z "$RABBITMQ_POD" ]; then
+    echo -e "${YELLOW}🎯 Configurando plugins no pod: $RABBITMQ_POD${NC}"
+    
+    # Verificar plugins disponíveis
+    echo -e "${BLUE}📋 Verificando plugins disponíveis...${NC}"
+    kubectl exec -n ${NAMESPACE} $RABBITMQ_POD -- rabbitmq-plugins list | grep -E "(delayed_message|consistent_hash)"
+    
+    # Habilitar plugin delayed message (se não estiver habilitado)
+    echo -e "${YELLOW}⚡ Habilitando rabbitmq_delayed_message_exchange...${NC}"
+    kubectl exec -n ${NAMESPACE} $RABBITMQ_POD -- rabbitmq-plugins enable rabbitmq_delayed_message_exchange
+    
+    # Habilitar plugin consistent hash (NOVO - FASE 2)
+    echo -e "${YELLOW}🎯 Habilitando rabbitmq_consistent_hash_exchange...${NC}"
+    kubectl exec -n ${NAMESPACE} $RABBITMQ_POD -- rabbitmq-plugins enable rabbitmq_consistent_hash_exchange
+    
+    # Verificar plugins habilitados
+    echo -e "${BLUE}✅ Verificando plugins habilitados:${NC}"
+    kubectl exec -n ${NAMESPACE} $RABBITMQ_POD -- rabbitmq-plugins list | grep -E "(delayed_message|consistent_hash)"
+    
+    echo -e "${GREEN}✅ Plugins configurados com sucesso!${NC}"
+else
+    echo -e "${RED}❌ Não foi possível encontrar pod do RabbitMQ${NC}"
+fi
+
 echo ""
 echo -e "${GREEN}=================================================${NC}"
 echo -e "${GREEN}✅ Deploy completo realizado com sucesso!${NC}"

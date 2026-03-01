@@ -42,6 +42,8 @@ WORKDIR /app
 
 # Copiar apenas os arquivos necessários para o webhook worker
 COPY webhook_worker.py .
+COPY partitioned_message_worker.py .
+COPY outbox_publisher.py .
 COPY rabbitmq_manager.py .
 COPY database.py .
 COPY config.py .

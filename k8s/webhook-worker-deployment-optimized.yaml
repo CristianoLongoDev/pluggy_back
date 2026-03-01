@@ -7,7 +7,7 @@ metadata:
     app: webhook-worker-optimized
     version: optimized
 spec:
-  replicas: 2
+  replicas: 1  # Reduzido: workers particionados fazem o trabalho pesado
   selector:
     matchLabels:
       app: webhook-worker-optimized
@@ -71,11 +71,11 @@ spec:
         # Recursos otimizados para a imagem menor
         resources:
           requests:
-            memory: "24Mi"    # Reduzido de 32Mi
-            cpu: "15m"        # Reduzido de 20m
+            memory: "40Mi"    # Aumentado para cobrir uso real (~34Mi)
+            cpu: "15m"        # Mantido
           limits:
-            memory: "48Mi"    # Reduzido de 64Mi
-            cpu: "80m"        # Reduzido de 100m
+            memory: "80Mi"    # Aumentado proporcionalmente
+            cpu: "80m"        # Mantido
         
         # Health checks otimizados
         livenessProbe:
@@ -119,6 +119,14 @@ spec:
       
       restartPolicy: Always
       
+      # Usar secret do Docker Hub para evitar rate limits
+      imagePullSecrets:
+      - name: dockerhub-secret
+      
+      # Usar secret do Docker Hub para evitar rate limits
+      imagePullSecrets:
+      - name: dockerhub-secret
+      
       # Tolerância a falhas e distribuição de pods
       affinity:
         podAntiAffinity:
@@ -144,7 +152,7 @@ metadata:
     app: message-worker-optimized
     version: optimized
 spec:
-  replicas: 2
+  replicas: 1  # Reduzido: workers particionados fazem o trabalho pesado
   selector:
     matchLabels:
       app: message-worker-optimized
@@ -160,8 +168,8 @@ spec:
         image: cristianopluggerbi/webhook-worker:latest
         imagePullPolicy: Always
         
-        # Comando para processar fila de mensagens
-        args: ["python", "webhook_worker.py", "processed_messages"]
+        # Comando para processar fila de status_updates  
+        args: ["python", "webhook_worker.py", "status_updates"]
         
         env:
         - name: WEBHOOK_VERIFY_TOKEN
@@ -202,11 +210,11 @@ spec:
         
         resources:
           requests:
-            memory: "24Mi"
-            cpu: "15m"
+            memory: "128Mi"   # Aumentado novamente - 93% ainda alto
+            cpu: "15m"        # Mantido
           limits:
-            memory: "48Mi"
-            cpu: "80m"
+            memory: "256Mi"   # Quadruplicado - garantir headroom adequado
+            cpu: "80m"        # Mantido
         
         livenessProbe:
           exec:
@@ -233,4 +241,8 @@ spec:
         runAsGroup: 1001
         fsGroup: 1001
       
-      restartPolicy: Always 
+      restartPolicy: Always
+      
+      # Usar secret do Docker Hub para evitar rate limits
+      imagePullSecrets:
+      - name: dockerhub-secret 

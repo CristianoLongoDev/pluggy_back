@@ -18,6 +18,7 @@ RUN pip install --no-cache-dir websockets requests cryptography
 # Copiar código da aplicação
 COPY config.py .
 COPY database.py .
+COPY auth_utils.py .
 COPY websocket_server.py .
 COPY websocket_notifier.py .
 COPY websocket_main.py .

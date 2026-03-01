@@ -4,8 +4,8 @@ metadata:
   name: whatsapp-webhook-ingress
   namespace: whatsapp-webhook
   annotations:
-    nginx.ingress.kubernetes.io/ssl-redirect: "true"
-    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
     nginx.ingress.kubernetes.io/proxy-body-size: "10m"
     nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
@@ -39,10 +39,10 @@ spec:
   ingressClassName: nginx
   tls:
   - hosts:
-    - atendimento.pluggerbi.com
+    - pluggyapi.pluggerbi.com
     secretName: whatsapp-webhook-tls
   rules:
-  - host: atendimento.pluggerbi.com
+  - host: pluggyapi.pluggerbi.com
     http:
       paths:
       # Rotas da API

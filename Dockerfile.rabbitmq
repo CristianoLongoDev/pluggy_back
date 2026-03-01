@@ -6,12 +6,17 @@ ENV RABBITMQ_DEFAULT_USER=admin \
     RABBITMQ_DEFAULT_PASS=rabbitmq123 \
     RABBITMQ_ERLANG_COOKIE=whatsapp-webhook-cookie
 
-# Instalar curl e plugin delayed message exchange
+# Instalar curl e plugins necessários
 ENV PLUGIN_VERSION=3.12.0  
 RUN apt-get update && apt-get install -y curl && \
+    # Plugin delayed message exchange
     curl -L https://github.com/rabbitmq/rabbitmq-delayed-message-exchange/releases/download/v${PLUGIN_VERSION}/rabbitmq_delayed_message_exchange-${PLUGIN_VERSION}.ez \
     -o /opt/rabbitmq/plugins/rabbitmq_delayed_message_exchange.ez && \
+    # Plugin consistent hash exchange
+    curl -L https://github.com/rabbitmq/rabbitmq-consistent-hash-exchange/releases/download/v${PLUGIN_VERSION}/rabbitmq_consistent_hash_exchange-${PLUGIN_VERSION}.ez \
+    -o /opt/rabbitmq/plugins/rabbitmq_consistent_hash_exchange.ez && \
     chown rabbitmq:rabbitmq /opt/rabbitmq/plugins/rabbitmq_delayed_message_exchange.ez && \
+    chown rabbitmq:rabbitmq /opt/rabbitmq/plugins/rabbitmq_consistent_hash_exchange.ez && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Criar usuário não-root para segurança

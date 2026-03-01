@@ -97,7 +97,7 @@ class DatabaseManager:
         logger.info("ℹ️ Usando conexões por demanda - nada para desconectar")
         
     def create_table_if_not_exists(self):
-        """Cria as tabelas logs e contacts se não existirem"""
+        """Cria tabelas auxiliares se não existirem"""
         def _create_tables_operation(connection):
             cursor = connection.cursor()
             
@@ -176,6 +176,45 @@ class DatabaseManager:
             
             cursor.execute(create_config_table_query)
             logger.info("Tabela config verificada/criada com sucesso")
+
+            # Criar tabela users (auth local)
+            create_users_table_query = """
+            CREATE TABLE IF NOT EXISTS users (
+                id VARCHAR(36) PRIMARY KEY,
+                account_id VARCHAR(36) NULL,
+                email VARCHAR(255) NOT NULL,
+                password_hash VARCHAR(255) NOT NULL,
+                full_name VARCHAR(255) NULL,
+                role VARCHAR(50) NOT NULL DEFAULT 'user',
+                is_active TINYINT(1) NOT NULL DEFAULT 1,
+                last_login_at TIMESTAMP NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                UNIQUE KEY uq_users_email (email),
+                INDEX idx_users_account_id (account_id),
+                INDEX idx_users_created_at (created_at)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+            """
+            cursor.execute(create_users_table_query)
+            logger.info("Tabela users verificada/criada com sucesso")
+
+            # Criar tabela refresh_tokens (auth local)
+            create_refresh_tokens_table_query = """
+            CREATE TABLE IF NOT EXISTS refresh_tokens (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                user_id VARCHAR(36) NOT NULL,
+                token_hash CHAR(64) NOT NULL,
+                expires_at TIMESTAMP NOT NULL,
+                revoked_at TIMESTAMP NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE KEY uq_refresh_token_hash (token_hash),
+                INDEX idx_refresh_user_id (user_id),
+                INDEX idx_refresh_expires_at (expires_at),
+                INDEX idx_refresh_revoked_at (revoked_at)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+            """
+            cursor.execute(create_refresh_tokens_table_query)
+            logger.info("Tabela refresh_tokens verificada/criada com sucesso")
             
             connection.commit()
             cursor.close()
@@ -872,11 +911,29 @@ class DatabaseManager:
         
         # Notificar via WebSocket se mensagem foi inserida com sucesso
         if result and notify_websocket:
+            logger.info(f"🔔 DATABASE-DEBUG: Tentando notificar WebSocket para conversa {conversation_id}, message_id {result}")
             try:
-                from websocket_notifier import notify_message_saved
-                notify_message_saved(conversation_id, result, message_text, sender, message_type, tokens or 0)
+                # SOLUÇÃO DIRETA: Usar websocket_notifier_simple (compatível com workers)
+                try:
+                    from websocket_notifier_simple import notify_message_saved
+                    notify_message_saved(
+                        conversation_id, 
+                        result,
+                        message_text,
+                        sender,
+                        message_type,
+                        tokens or 0
+                    )
+                    logger.info(f"✅ DATABASE-DEBUG: WebSocket notificado via websocket_notifier_simple")
+                except ImportError:
+                    logger.warning(f"⚠️ DATABASE-DEBUG: websocket_notifier_simple não disponível - pulando notificação")
+                except Exception as e:
+                    logger.warning(f"⚠️ DATABASE-DEBUG: Erro na notificação websocket_notifier_simple: {e}")
+                
             except Exception as e:
-                logger.warning(f"⚠️ Falha ao notificar WebSocket: {e}")
+                logger.warning(f"⚠️ DATABASE-DEBUG: Erro geral na notificação WebSocket: {e}")
+                import traceback
+                logger.warning(f"⚠️ DATABASE-DEBUG: Traceback geral: {traceback.format_exc()}")
         
         return result
 
@@ -1051,6 +1108,136 @@ class DatabaseManager:
         
         result = self._execute_with_fresh_connection(_get_account_operation)
         return result
+
+    # ==================== AUTH (USERS / REFRESH TOKENS) ====================
+
+    def insert_user(self, user_id, email, password_hash, account_id=None, full_name=None, role="user", is_active=True):
+        """Cria usuário local (email/senha)."""
+        if not self.enabled:
+            return False
+
+        def _insert_user_operation(connection):
+            cursor = connection.cursor()
+            query = """
+                INSERT INTO users (id, account_id, email, password_hash, full_name, role, is_active)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """
+            cursor.execute(query, (user_id, account_id, email, password_hash, full_name, role, 1 if is_active else 0))
+            connection.commit()
+            cursor.close()
+            return True
+
+        result = self._execute_with_fresh_connection(_insert_user_operation)
+        return result is not None
+
+    def get_user_by_email(self, email):
+        if not self.enabled:
+            return None
+
+        def _get_user_by_email_operation(connection):
+            cursor = connection.cursor(dictionary=True)
+            query = """
+                SELECT id, account_id, email, password_hash, full_name, role, is_active, last_login_at, created_at, updated_at
+                FROM users
+                WHERE email = %s
+                LIMIT 1
+            """
+            cursor.execute(query, (email,))
+            user = cursor.fetchone()
+            cursor.close()
+            return user
+
+        return self._execute_with_fresh_connection(_get_user_by_email_operation)
+
+    def get_user_by_id(self, user_id):
+        if not self.enabled:
+            return None
+
+        def _get_user_by_id_operation(connection):
+            cursor = connection.cursor(dictionary=True)
+            query = """
+                SELECT id, account_id, email, full_name, role, is_active, last_login_at, created_at, updated_at
+                FROM users
+                WHERE id = %s
+                LIMIT 1
+            """
+            cursor.execute(query, (user_id,))
+            user = cursor.fetchone()
+            cursor.close()
+            return user
+
+        return self._execute_with_fresh_connection(_get_user_by_id_operation)
+
+    def update_user_last_login(self, user_id):
+        if not self.enabled:
+            return False
+
+        def _update_user_last_login_operation(connection):
+            cursor = connection.cursor()
+            query = "UPDATE users SET last_login_at = CURRENT_TIMESTAMP WHERE id = %s"
+            cursor.execute(query, (user_id,))
+            connection.commit()
+            cursor.close()
+            return True
+
+        result = self._execute_with_fresh_connection(_update_user_last_login_operation)
+        return result is not None
+
+    def store_refresh_token(self, user_id, token_hash, expires_at):
+        if not self.enabled:
+            return False
+
+        def _store_refresh_token_operation(connection):
+            cursor = connection.cursor()
+            query = """
+                INSERT INTO refresh_tokens (user_id, token_hash, expires_at)
+                VALUES (%s, %s, %s)
+            """
+            cursor.execute(query, (user_id, token_hash, expires_at))
+            connection.commit()
+            cursor.close()
+            return True
+
+        result = self._execute_with_fresh_connection(_store_refresh_token_operation)
+        return result is not None
+
+    def get_refresh_token_by_hash(self, token_hash):
+        if not self.enabled:
+            return None
+
+        def _get_refresh_token_operation(connection):
+            cursor = connection.cursor(dictionary=True)
+            query = """
+                SELECT id, user_id, token_hash, expires_at, revoked_at, created_at
+                FROM refresh_tokens
+                WHERE token_hash = %s
+                LIMIT 1
+            """
+            cursor.execute(query, (token_hash,))
+            row = cursor.fetchone()
+            cursor.close()
+            return row
+
+        return self._execute_with_fresh_connection(_get_refresh_token_operation)
+
+    def revoke_refresh_token_by_hash(self, token_hash):
+        if not self.enabled:
+            return False
+
+        def _revoke_refresh_token_operation(connection):
+            cursor = connection.cursor()
+            query = """
+                UPDATE refresh_tokens
+                SET revoked_at = CURRENT_TIMESTAMP
+                WHERE token_hash = %s AND revoked_at IS NULL
+            """
+            cursor.execute(query, (token_hash,))
+            connection.commit()
+            cursor.close()
+            return True
+
+        result = self._execute_with_fresh_connection(_revoke_refresh_token_operation)
+        return result is not None
 
     # ==================== CHANNELS CRUD ====================
     
@@ -2838,6 +3025,192 @@ class DatabaseManager:
             return result[0] if result else 0
         
         return self._execute_with_fresh_connection(_count_conversations_operation) or 0
+
+    # ===== OUTBOX PATTERN METHODS =====
+    
+    def save_webhook_with_outbox(self, event_type, event_data, message_id=None):
+        """
+        Salva webhook no banco E na tabela outbox em uma única transação
+        Garante que ou ambos são salvos ou nenhum é salvo (atomicidade)
+        """
+        if not self.enabled:
+            return False
+        
+        def _save_webhook_with_outbox_operation(connection):
+            try:
+                # Iniciar transação
+                connection.start_transaction()
+                
+                # 1. Salvar webhook event (como antes)
+                cursor = connection.cursor()
+                
+                # Extrair dados básicos do webhook
+                phone_number = None
+                message_text = None
+                contact_name = None
+                
+                if event_data.get('object') == 'whatsapp_business_account':
+                    for entry in event_data.get('entry', []):
+                        for change in entry.get('changes', []):
+                            value = change.get('value', {})
+                            if 'messages' in value:
+                                for msg in value['messages']:
+                                    phone_number = msg.get('from')
+                                    if msg.get('type') == 'text':
+                                        message_text = msg.get('text', {}).get('body', '')
+                                    elif msg.get('type') in ['image', 'document', 'audio']:
+                                        message_text = f"[{msg.get('type')}]"
+                                    break
+                                    
+                            if 'contacts' in value:
+                                for contact in value['contacts']:
+                                    contact_name = contact.get('profile', {}).get('name')
+                                    break
+                
+                # Inserir na tabela logs (substituindo webhook_event)
+                insert_query = """
+                    INSERT INTO logs (event_type, event_data, type, message, id_contact, created_at)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                """
+                created_at = datetime.now()
+                cursor.execute(insert_query, (
+                    event_type,
+                    json.dumps(event_data),
+                    'text' if message_text else None,  # Usar type do webhook
+                    message_text,  # Campo message
+                    phone_number,  # Campo id_contact
+                    created_at
+                ))
+                
+                log_id = cursor.lastrowid
+                
+                # 2. Salvar na tabela outbox
+                outbox_id = str(uuid.uuid4())
+                aggregate_id = message_id or f"log_{log_id}"
+                
+                outbox_query = """
+                    INSERT INTO outbox (id, aggregate_id, event_type, payload, created_at)
+                    VALUES (%s, %s, %s, %s, %s)
+                """
+                
+                # Payload do outbox incluindo dados necessários para o RabbitMQ
+                outbox_payload = {
+                    "log_id": log_id,  # Renomeado de webhook_event_id para log_id
+                    "event_type": event_type,
+                    "event_data": event_data,
+                    "message_id": message_id,
+                    "created_at": created_at.isoformat()
+                }
+                
+                cursor.execute(outbox_query, (
+                    outbox_id,
+                    aggregate_id,
+                    f"rabbitmq.{event_type}",  # Prefixo para identificar eventos do RabbitMQ
+                    json.dumps(outbox_payload),
+                    created_at
+                ))
+                
+                # Commit da transação (atomicidade garantida)
+                connection.commit()
+                cursor.close()
+                
+                logger.info(f"✅ Webhook e outbox salvos atomicamente: log_id={log_id}, outbox_id={outbox_id}")
+                return True
+                
+            except Exception as e:
+                # Rollback em caso de erro
+                connection.rollback()
+                cursor.close()
+                logger.error(f"❌ Erro ao salvar webhook com outbox: {e}")
+                raise
+        
+        return self._execute_with_fresh_connection(_save_webhook_with_outbox_operation)
+    
+    def get_pending_outbox_events(self, limit=100):
+        """
+        Busca eventos pendentes na tabela outbox para publicação
+        """
+        if not self.enabled:
+            return []
+        
+        def _get_pending_outbox_operation(connection):
+            cursor = connection.cursor(dictionary=True)
+            
+            query = """
+                SELECT id, aggregate_id, event_type, payload, created_at
+                FROM outbox 
+                WHERE processed_at IS NULL
+                ORDER BY created_at ASC
+                LIMIT %s
+            """
+            
+            logger.info(f"🔍 OUTBOX-QUERY-DEBUG: Executando query para buscar {limit} eventos pendentes")
+            cursor.execute(query, (limit,))
+            results = cursor.fetchall()
+            logger.info(f"🔍 OUTBOX-QUERY-DEBUG: Query retornou {len(results)} eventos")
+            if results:
+                for i, result in enumerate(results[:3]):  # Log apenas primeiros 3
+                    logger.info(f"🔍 OUTBOX-QUERY-DEBUG: Evento {i+1}: id={result['id']}, created_at={result['created_at']}")
+            cursor.close()
+            
+            return results or []
+        
+        return self._execute_with_fresh_connection(_get_pending_outbox_operation) or []
+    
+    def mark_outbox_as_processed(self, outbox_ids):
+        """
+        Marca eventos do outbox como processados
+        """
+        if not self.enabled or not outbox_ids:
+            return False
+        
+        def _mark_outbox_processed_operation(connection):
+            cursor = connection.cursor()
+            
+            # Usar IN clause para múltiplos IDs
+            placeholders = ','.join(['%s'] * len(outbox_ids))
+            query = f"""
+                UPDATE outbox 
+                SET processed_at = %s 
+                WHERE id IN ({placeholders})
+            """
+            
+            params = [datetime.now()] + list(outbox_ids)
+            cursor.execute(query, params)
+            
+            rows_affected = cursor.rowcount
+            connection.commit()
+            cursor.close()
+            
+            return rows_affected
+        
+        result = self._execute_with_fresh_connection(_mark_outbox_processed_operation)
+        return result and result > 0
+    
+    def cleanup_old_outbox_events(self, days_old=7):
+        """
+        Remove eventos do outbox já processados há mais de X dias
+        """
+        if not self.enabled:
+            return 0
+        
+        def _cleanup_outbox_operation(connection):
+            cursor = connection.cursor()
+            
+            query = """
+                DELETE FROM outbox 
+                WHERE processed_at IS NOT NULL 
+                AND processed_at < DATE_SUB(NOW(), INTERVAL %s DAY)
+            """
+            
+            cursor.execute(query, (days_old,))
+            rows_deleted = cursor.rowcount
+            connection.commit()
+            cursor.close()
+            
+            return rows_deleted
+        
+        return self._execute_with_fresh_connection(_cleanup_outbox_operation) or 0
 
 # Instância global do DatabaseManager
 db_manager = DatabaseManager() 

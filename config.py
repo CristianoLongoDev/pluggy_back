@@ -78,3 +78,19 @@ SUPABASE_JWKS_URL = f"{SUPABASE_URL}/auth/v1/.well-known/jwks.json" if SUPABASE_
 
 # Configurações JWT para WebSocket
 JWT_SECRET_KEY = os.getenv('JWT_SECRET_KEY', 'websocket-default-secret-key-change-in-production') 
+
+# ==================== AUTH (Backend próprio) ====================
+# JWT HS256 para autenticação do seu backend.
+# Em produção, defina AUTH_JWT_SECRET com um valor longo/aleatório.
+AUTH_JWT_SECRET = os.getenv('AUTH_JWT_SECRET', JWT_SECRET_KEY)
+AUTH_JWT_ISSUER = os.getenv('AUTH_JWT_ISSUER', 'whatsapp-backend')
+AUTH_JWT_AUDIENCE = os.getenv('AUTH_JWT_AUDIENCE', 'whatsapp-api')
+AUTH_JWT_ACCESS_TTL_SECONDS = int(os.getenv('AUTH_JWT_ACCESS_TTL_SECONDS', 900))  # 15 min
+AUTH_REFRESH_TTL_SECONDS = int(os.getenv('AUTH_REFRESH_TTL_SECONDS', 2592000))  # 30 dias
+
+# Permite migração suave: se true e Supabase configurado, aceita tokens do Supabase também.
+AUTH_ACCEPT_SUPABASE_TOKENS = os.getenv('AUTH_ACCEPT_SUPABASE_TOKENS', 'False').lower() == 'true'
+
+# Bootstrap opcional para criar usuários iniciais com segurança (não exponha publicamente).
+# Se vazio, endpoint de bootstrap fica desabilitado.
+AUTH_BOOTSTRAP_SECRET = os.getenv('AUTH_BOOTSTRAP_SECRET', '')

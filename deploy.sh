@@ -125,16 +125,48 @@ if [ -f "k8s/service.yaml" ]; then
     echo -e "${GREEN}✅ Service aplicado${NC}"
 fi
 
-# Aplicar deployment
-echo -e "${YELLOW}🚀 Aplicando deployment...${NC}"
+# Aplicar deployment principal
+echo -e "${YELLOW}🚀 Aplicando deployment principal...${NC}"
 kubectl apply -f k8s/deployment.yaml
 
 if [ $? -ne 0 ]; then
-    echo -e "${RED}❌ Falha ao aplicar deployment${NC}"
+    echo -e "${RED}❌ Falha ao aplicar deployment principal${NC}"
     exit 1
 fi
 
-echo -e "${GREEN}✅ Deployment aplicado com sucesso${NC}"
+echo -e "${GREEN}✅ Deployment principal aplicado com sucesso${NC}"
+
+# Aplicar RabbitMQ otimizado
+if [ -f "k8s/rabbitmq-deployment-optimized.yaml" ]; then
+    echo -e "${YELLOW}🐰 Aplicando RabbitMQ otimizado...${NC}"
+    kubectl apply -f k8s/rabbitmq-deployment-optimized.yaml
+    echo -e "${GREEN}✅ RabbitMQ otimizado aplicado${NC}"
+fi
+
+# Aplicar Outbox Publisher melhorado
+echo -e "${YELLOW}📤 Aplicando Outbox Publisher melhorado...${NC}"
+if [ -f "k8s/outbox-publisher-deployment-improved.yaml" ]; then
+    kubectl apply -f k8s/outbox-publisher-deployment-improved.yaml
+    echo -e "${GREEN}✅ Outbox Publisher melhorado aplicado${NC}"
+else
+    # Fallback para versão antiga
+    kubectl apply -f k8s/outbox-publisher-deployment.yaml
+    echo -e "${YELLOW}⚠️ Usando Outbox Publisher versão antiga${NC}"
+fi
+
+# Aplicar Webhook Workers otimizados
+if [ -f "k8s/webhook-worker-deployment-optimized.yaml" ]; then
+    echo -e "${YELLOW}🔧 Aplicando Webhook Workers otimizados...${NC}"
+    kubectl apply -f k8s/webhook-worker-deployment-optimized.yaml
+    echo -e "${GREEN}✅ Webhook Workers otimizados aplicados${NC}"
+fi
+
+# Aplicar Workers particionados
+if [ -f "k8s/partitioned-workers-deployment.yaml" ]; then
+    echo -e "${YELLOW}⚡ Aplicando Workers particionados...${NC}"
+    kubectl apply -f k8s/partitioned-workers-deployment.yaml
+    echo -e "${GREEN}✅ Workers particionados aplicados${NC}"
+fi
 
 # Aplicar frontend deployment
 if [ -f "k8s/frontend-deployment.yaml" ]; then
@@ -153,9 +185,27 @@ fi
 echo -e "${YELLOW}⏳ Aguardando deployments serem processados...${NC}"
 sleep 15
 
-# Verificar status dos pods
+# Verificar status dos pods principais
 check_pod_status "whatsapp-webhook" 240
-check_pod_status "whatsapp-frontend" 120
+
+# Verificar status dos componentes melhorados
+echo -e "${BLUE}🔍 Verificando status dos componentes melhorados...${NC}"
+
+# Outbox Publisher
+echo -e "${YELLOW}📤 Status do Outbox Publisher:${NC}"
+kubectl get pods -n ${NAMESPACE} -l app=outbox-publisher -o wide
+
+# Webhook Workers
+echo -e "${YELLOW}🔧 Status dos Webhook Workers:${NC}"
+kubectl get pods -n ${NAMESPACE} -l app=webhook-worker-optimized -o wide
+
+# Workers Particionados
+echo -e "${YELLOW}⚡ Status dos Workers Particionados:${NC}"
+kubectl get pods -n ${NAMESPACE} -l app=partitioned-msg-worker -o wide
+
+# RabbitMQ
+echo -e "${YELLOW}🐰 Status do RabbitMQ:${NC}"
+kubectl get pods -n ${NAMESPACE} -l app=rabbitmq -o wide
 
 # Verificar se há ingress
 if [ -f "k8s/ingress.yaml" ]; then
@@ -193,6 +243,45 @@ kubectl get pods -n ${NAMESPACE} -l app=whatsapp-webhook --no-headers | head -1 
     fi
 done
 
+# Verificar se as melhorias estão funcionando
+echo ""
+echo -e "${BLUE}🔧 Verificando melhorias implementadas...${NC}"
+
+# Verificar logs do Outbox Publisher para conexão
+echo -e "${YELLOW}📤 Verificando logs do Outbox Publisher (últimas 5 linhas):${NC}"
+kubectl logs -n ${NAMESPACE} -l app=outbox-publisher --tail=5 2>/dev/null || echo -e "${YELLOW}⚠️ Outbox Publisher ainda não está pronto${NC}"
+
+# Verificar se RabbitMQ está respondendo
+echo -e "${YELLOW}🐰 Testando conectividade do RabbitMQ:${NC}"
+kubectl get pods -n ${NAMESPACE} -l app=rabbitmq --no-headers | head -1 | while read pod_name rest; do
+    if [ ! -z "$pod_name" ]; then
+        kubectl exec -n ${NAMESPACE} $pod_name -- rabbitmqctl list_queues 2>/dev/null | head -3 || echo -e "${YELLOW}⚠️ RabbitMQ ainda não está pronto${NC}"
+    fi
+done
+
+# Verificar status das filas críticas
+echo -e "${YELLOW}📊 Status das filas críticas:${NC}"
+kubectl get pods -n ${NAMESPACE} -l app=rabbitmq --no-headers | head -1 | while read pod_name rest; do
+    if [ ! -z "$pod_name" ]; then
+        echo "  webhook_messages:"
+        kubectl exec -n ${NAMESPACE} $pod_name -- rabbitmqctl list_queues webhook_messages 2>/dev/null || echo "    Status: não disponível"
+        echo "  chatgpt_process:"
+        kubectl exec -n ${NAMESPACE} $pod_name -- rabbitmqctl list_queues chatgpt_process 2>/dev/null || echo "    Status: não disponível"
+        echo "  msg-worker.q.*:"
+        kubectl exec -n ${NAMESPACE} $pod_name -- rabbitmqctl list_queues | grep "msg-worker" 2>/dev/null || echo "    Status: não disponível"
+    fi
+done
+
+# Verificar se webhook workers estão processando ChatGPT delayed
+echo ""
+echo -e "${YELLOW}🤖 Status do processamento ChatGPT:${NC}"
+kubectl get pods -n ${NAMESPACE} -l app=webhook-worker-optimized --no-headers | head -1 | while read pod_name rest; do
+    if [ ! -z "$pod_name" ]; then
+        echo "  Verificando thread delayed no worker:"
+        kubectl logs -n ${NAMESPACE} $pod_name --tail=50 | grep -E "(THREAD-DEBUG|delayed.*iniciada)" | tail -2 || echo "    Thread delayed: não encontrada nos logs recentes"
+    fi
+done
+
 echo ""
 echo -e "${GREEN}=================================================${NC}"
 echo -e "${GREEN}🎉 DEPLOY CONCLUÍDO COM SUCESSO!${NC}"
@@ -201,23 +290,48 @@ echo ""
 echo -e "${BLUE}📋 INFORMAÇÕES ÚTEIS:${NC}"
 echo ""
 echo -e "${YELLOW}🔗 URL da aplicação:${NC}"
-echo -e "   https://atendimento.pluggerbi.com"
+echo -e "   https://pluggyapi.pluggerbi.com"
 echo ""
 echo -e "${YELLOW}🩺 Health check:${NC}"
-echo -e "   https://atendimento.pluggerbi.com/health"
+echo -e "   https://pluggyapi.pluggerbi.com/health"
 echo ""
 echo -e "${YELLOW}🤖 Status do bot:${NC}"
-echo -e "   https://atendimento.pluggerbi.com/bot/status"
+echo -e "   https://pluggyapi.pluggerbi.com/bot/status"
 echo ""
 echo -e "${YELLOW}📊 Para verificar logs:${NC}"
 echo -e "   kubectl logs -f deployment/whatsapp-webhook -n ${NAMESPACE}"
+echo -e "   kubectl logs -f deployment/outbox-publisher -n ${NAMESPACE}  # Outbox Publisher"
+echo -e "   kubectl logs -f deployment/webhook-worker-optimized -n ${NAMESPACE}  # Workers"
 echo ""
 echo -e "${YELLOW}🧪 Para testar webhook:${NC}"
-echo -e "   curl -X POST https://atendimento.pluggerbi.com/webhook \\\\"
+echo -e "   curl -X POST https://pluggyapi.pluggerbi.com/webhook \\\\"
 echo -e "        -H 'Content-Type: application/json' \\\\"
 echo -e "        -d '{\"test\": \"message\"}'"
 echo ""
 echo -e "${YELLOW}🐰 Status do RabbitMQ:${NC}"
-echo -e "   https://atendimento.pluggerbi.com/rabbitmq/status"
+echo -e "   https://pluggyapi.pluggerbi.com/rabbitmq/status"
+echo -e "   kubectl exec -n ${NAMESPACE} deployment/rabbitmq -- rabbitmqctl list_queues"
+echo ""
+echo -e "${YELLOW}📤 Monitorar Outbox Publisher:${NC}"
+echo -e "   kubectl logs -f deployment/outbox-publisher -n ${NAMESPACE} | grep -E '(Connection|STATS|Processando)'"
+echo ""
+echo -e "${YELLOW}🤖 Monitorar ChatGPT Delayed:${NC}"
+echo -e "   kubectl logs -f deployment/webhook-worker-optimized -n ${NAMESPACE} | grep -E '(DELAYED-DEBUG|DELAY-CHECK-DEBUG|CHATGPT-DEBUG|INTERNAL-DEBUG)'"
+echo ""
+echo -e "${YELLOW}🔧 Comandos úteis de troubleshooting:${NC}"
+echo -e "   # Reiniciar Outbox Publisher:"
+echo -e "   kubectl rollout restart deployment/outbox-publisher -n ${NAMESPACE}"
+echo -e "   "
+echo -e "   # Reiniciar Webhook Workers (para ChatGPT):"
+echo -e "   kubectl rollout restart deployment/webhook-worker-optimized -n ${NAMESPACE}"
+echo -e "   "
+echo -e "   # Verificar status de todas as filas:"
+echo -e "   kubectl exec -n ${NAMESPACE} deployment/rabbitmq -- rabbitmqctl list_queues"
+echo -e "   "
+echo -e "   # Verificar fila ChatGPT especificamente:"
+echo -e "   kubectl exec -n ${NAMESPACE} deployment/rabbitmq -- rabbitmqctl list_queues chatgpt_process"
+echo -e "   "
+echo -e "   # Verificar outbox no banco:"
+echo -e "   kubectl exec -n ${NAMESPACE} deployment/whatsapp-webhook -- python3 -c \"from database import db_manager; print('Outbox pendente:', db_manager.execute_query('SELECT COUNT(*) FROM outbox WHERE processed_at IS NULL'))\""
 echo ""
 echo -e "${GREEN}=================================================${NC}" 

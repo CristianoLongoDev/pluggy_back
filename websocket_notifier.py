@@ -68,6 +68,7 @@ class WebSocketNotifier:
                         cm.conversation_id,
                         cm.message_text,
                         cm.sender,
+                        cm.user_id,
                         cm.message_type,
                         cm.timestamp,
                         cm.tokens,
@@ -103,7 +104,8 @@ class WebSocketNotifier:
                 "id": message["id"],  # ID único da mensagem
                 "conversation_id": message["conversation_id"],  # CRÍTICO: Campo de agrupamento
                 "content": message["message_text"],  # Padronizar para 'content'
-                "sender": self._normalize_sender(message["sender"]),  # Padronizar valores
+                "sender": message["sender"],  # Usar exatamente o valor do conversation_message.sender
+                "user_id": message.get("user_id"),  # Incluir user_id do conversation_message.user_id
                 "timestamp": message["timestamp"].isoformat() if message["timestamp"] else None,  # ISO format
                 "channel": "whatsapp",  # Padrão para este sistema
                 "message_type": message["message_type"],  # Manter para compatibilidade
@@ -157,6 +159,7 @@ def notify_message_saved(conversation_id, message_id, message_text, sender, mess
                     cm.conversation_id,
                     cm.message_text,
                     cm.sender,
+                    cm.user_id,
                     cm.message_type,
                     cm.timestamp,
                     cm.tokens,
