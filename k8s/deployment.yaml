@@ -69,6 +69,25 @@ spec:
             secretKeyRef:
               name: whatsapp-webhook-secret
               key: SUPABASE_ANON_KEY
+        - name: AUTH_BOOTSTRAP_SECRET
+          value: "VtCXlegSaKNxoFgBmlYEjKYzASKA5sXZLeVuw941A3k"
+        - name: SMTP_HOST
+          value: "smtp.email.sa-saopaulo-1.oci.oraclecloud.com"
+        - name: SMTP_PORT
+          value: "587"
+        - name: SMTP_USER
+          value: "ocid1.user.oc1..aaaaaaaactxeznak3sqzncllsxld53a2jh7cn2jnwzmfvrebswfrr6ffldfq@ocid1.tenancy.oc1..aaaaaaaapdhesajf3zt5d4etvxcdwwzy7gond2flxsied6rsh3tsjdrj7yma.sg.com"
+        - name: SMTP_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: whatsapp-webhook-secret
+              key: SMTP_PASSWORD
+        - name: SMTP_FROM_EMAIL
+          value: "sending@pluggerbi.com"
+        - name: SMTP_FROM_NAME
+          value: "Plugger BI"
+        - name: FRONTEND_URL
+          value: "https://pluggyapi.pluggerbi.com"
         workingDir: /app
         command: ["python"]
         args: ["app.py"]

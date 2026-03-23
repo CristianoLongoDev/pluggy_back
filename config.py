@@ -94,3 +94,17 @@ AUTH_ACCEPT_SUPABASE_TOKENS = os.getenv('AUTH_ACCEPT_SUPABASE_TOKENS', 'False').
 # Bootstrap opcional para criar usuários iniciais com segurança (não exponha publicamente).
 # Se vazio, endpoint de bootstrap fica desabilitado.
 AUTH_BOOTSTRAP_SECRET = os.getenv('AUTH_BOOTSTRAP_SECRET', '')
+
+# Tempo de expiração do token de reset de senha (padrão: 30 minutos)
+PASSWORD_RESET_TTL_SECONDS = int(os.getenv('PASSWORD_RESET_TTL_SECONDS', 1800))
+
+# ==================== SMTP (Envio de e-mail) ====================
+SMTP_HOST = os.getenv('SMTP_HOST', '')
+SMTP_PORT = int(os.getenv('SMTP_PORT', 587))
+SMTP_USER = os.getenv('SMTP_USER', '')
+SMTP_PASSWORD = os.getenv('SMTP_PASSWORD', '')
+SMTP_FROM_EMAIL = os.getenv('SMTP_FROM_EMAIL', 'noreply@pluggerbi.com')
+SMTP_FROM_NAME = os.getenv('SMTP_FROM_NAME', 'Plugger BI')
+
+# URL do frontend (para montar links de reset de senha)
+FRONTEND_URL = os.getenv('FRONTEND_URL', 'https://pluggyapi.pluggerbi.com')

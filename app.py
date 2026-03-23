@@ -11,11 +11,14 @@ from config import (
     SUPABASE_URL, SUPABASE_ANON_KEY, SUPABASE_JWKS_URL,
     AUTH_BOOTSTRAP_SECRET, AUTH_REFRESH_TTL_SECONDS,
     AUTH_JWT_ACCESS_TTL_SECONDS, AUTH_JWT_ISSUER, AUTH_JWT_AUDIENCE,
-    AUTH_ACCEPT_SUPABASE_TOKENS
+    AUTH_ACCEPT_SUPABASE_TOKENS, PASSWORD_RESET_TTL_SECONDS,
+    FRONTEND_URL
 )
 from database import db_manager
 from rabbitmq_manager import rabbitmq_manager
 from datetime import datetime
+import hashlib
+import secrets
 import traceback
 import time
 import uuid
@@ -32,6 +35,7 @@ from auth_utils import (
     issue_access_token,
     validate_jwt_token,
 )
+from email_service import send_password_reset_email
 
 # Configurar logging
 logging.basicConfig(level=getattr(logging, LOG_LEVEL))
@@ -279,6 +283,145 @@ def get_account_by_id(account_id):
             "error": f"Erro interno do servidor: {str(e)}",
             "status": "error"
         }), 500
+
+
+@app.route('/users', methods=['GET'])
+@jwt_required
+def list_users():
+    """
+    Lista usuários da conta autenticada
+    """
+    try:
+        if not db_manager.enabled:
+            return jsonify({
+                "error": "Banco de dados não está habilitado",
+                "status": "error"
+            }), 503
+
+        account_id = get_account_id_from_token()
+        if not account_id:
+            return jsonify({
+                "error": "Token JWT não contém account_id válido",
+                "status": "error"
+            }), 400
+
+        limit = request.args.get('limit', 50, type=int)
+        offset = request.args.get('offset', 0, type=int)
+        if limit > 100:
+            limit = 100
+
+        users, total = db_manager.list_users_by_account(account_id, limit, offset)
+
+        for user in users:
+            for field in ('last_login_at', 'created_at', 'updated_at'):
+                if user.get(field):
+                    user[field] = user[field].isoformat()
+
+        logger.info(f"✅ Listados {len(users)} usuários para account {account_id}")
+
+        return jsonify({
+            "status": "success",
+            "data": {
+                "users": users,
+                "pagination": {
+                    "total": total,
+                    "limit": limit,
+                    "offset": offset,
+                    "has_next": offset + limit < total
+                }
+            }
+        }), 200
+
+    except Exception as e:
+        logger.error(f"❌ Erro no endpoint list_users: {e}")
+        return jsonify({
+            "error": f"Erro interno do servidor: {str(e)}",
+            "status": "error"
+        }), 500
+
+
+@app.route('/conversations', methods=['GET'])
+@jwt_required
+def list_conversations():
+    """
+    Lista conversas da conta autenticada
+    """
+    try:
+        if not db_manager.enabled:
+            return jsonify({
+                "error": "Banco de dados não está habilitado",
+                "status": "error"
+            }), 503
+
+        account_id = get_account_id_from_token()
+        if not account_id:
+            return jsonify({
+                "error": "Token JWT não contém account_id válido",
+                "status": "error"
+            }), 400
+
+        limit = request.args.get('limit', 50, type=int)
+        offset = request.args.get('offset', 0, type=int)
+        status = request.args.get('status', None)
+        if limit > 100:
+            limit = 100
+
+        conversations, total = db_manager.list_conversations_by_account(
+            account_id, limit, offset, status
+        )
+
+        formatted = []
+        for conv in conversations:
+            started_at = conv['started_at'].isoformat() if conv.get('started_at') else None
+            ended_at = conv['ended_at'].isoformat() if conv.get('ended_at') else None
+            last_msg_time = conv['last_message_time'].isoformat() if conv.get('last_message_time') else None
+
+            formatted.append({
+                "conversation_id": conv['conversation_id'],
+                "status": conv['status'],
+                "status_attendance": conv.get('status_attendance'),
+                "started_at": started_at,
+                "ended_at": ended_at,
+                "message_count": conv.get('message_count', 0),
+                "last_message": {
+                    "text": conv.get('last_message'),
+                    "timestamp": last_msg_time
+                } if conv.get('last_message') else None,
+                "contact": {
+                    "id": conv['contact_id'],
+                    "name": conv.get('contact_name'),
+                    "phone": conv.get('contact_phone'),
+                    "email": conv.get('contact_email')
+                },
+                "channel": {
+                    "id": conv.get('channel_id'),
+                    "name": conv.get('channel_name'),
+                    "type": conv.get('channel_type')
+                }
+            })
+
+        logger.info(f"✅ Listadas {len(formatted)} conversas para account {account_id}")
+
+        return jsonify({
+            "status": "success",
+            "data": {
+                "conversations": formatted,
+                "pagination": {
+                    "total": total,
+                    "limit": limit,
+                    "offset": offset,
+                    "has_next": offset + limit < total
+                }
+            }
+        }), 200
+
+    except Exception as e:
+        logger.error(f"❌ Erro no endpoint list_conversations: {e}")
+        return jsonify({
+            "error": f"Erro interno do servidor: {str(e)}",
+            "status": "error"
+        }), 500
+
 
 # ==================== HELPER FUNCTIONS ====================
 
@@ -530,6 +673,147 @@ def auth_bootstrap_create_user():
         logger.error(f"❌ Erro no bootstrap create-user: {e}")
         logger.error(f"Traceback: {traceback.format_exc()}")
         return jsonify({"error": "Erro interno do servidor", "status": "error"}), 500
+
+
+@app.route("/auth/reset-password/request", methods=["POST"])
+def auth_reset_password_request():
+    """
+    Endpoint público — o usuário informa o e-mail e recebe um link de reset por e-mail.
+    Resposta genérica para não vazar existência de contas.
+    """
+    try:
+        if not db_manager.enabled:
+            return jsonify({"error": "Banco de dados não está habilitado", "status": "error"}), 503
+
+        data = request.get_json() or {}
+        email = (data.get("email") or "").strip().lower()
+        if not email:
+            return jsonify({"error": "email é obrigatório", "status": "error"}), 400
+
+        generic_msg = "Se o e-mail estiver cadastrado, você receberá as instruções para redefinir sua senha."
+
+        user = db_manager.get_user_by_email(email)
+        if not user or not user.get("is_active"):
+            return jsonify({"status": "success", "message": generic_msg}), 200
+
+        db_manager.invalidate_reset_tokens_for_user(user["id"])
+
+        raw_token = secrets.token_urlsafe(48)
+        token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+        expires_at = datetime.utcnow() + timedelta(seconds=PASSWORD_RESET_TTL_SECONDS)
+
+        ok = db_manager.store_password_reset_token(user["id"], token_hash, expires_at)
+        if not ok:
+            logger.error(f"Falha ao salvar token de reset para {email}")
+            return jsonify({"status": "success", "message": generic_msg}), 200
+
+        ttl_minutes = PASSWORD_RESET_TTL_SECONDS // 60
+        email_sent = send_password_reset_email(
+            to_email=user["email"],
+            user_name=user.get("full_name") or "",
+            reset_token=raw_token,
+            frontend_url=FRONTEND_URL,
+            ttl_minutes=ttl_minutes,
+        )
+
+        if not email_sent:
+            logger.error(f"Falha ao enviar e-mail de reset para {email}")
+
+        return jsonify({"status": "success", "message": generic_msg}), 200
+    except Exception as e:
+        logger.error(f"❌ Erro no reset-password request: {e}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return jsonify({"error": "Erro interno do servidor", "status": "error"}), 500
+
+
+@app.route("/auth/reset-password/confirm", methods=["POST"])
+def auth_reset_password_confirm():
+    """
+    Redefine a senha usando um token de reset válido.
+    Público — não exige autenticação.
+    """
+    try:
+        if not db_manager.enabled:
+            return jsonify({"error": "Banco de dados não está habilitado", "status": "error"}), 503
+
+        data = request.get_json() or {}
+        token = data.get("token") or ""
+        new_password = data.get("new_password") or ""
+
+        if not token or not new_password:
+            return jsonify({"error": "token e new_password são obrigatórios", "status": "error"}), 400
+
+        if len(new_password) < 8:
+            return jsonify({"error": "A senha deve ter pelo menos 8 caracteres", "status": "error"}), 400
+
+        token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        stored = db_manager.get_valid_reset_token(token_hash)
+        if not stored:
+            return jsonify({"error": "Token inválido ou expirado", "status": "error"}), 401
+
+        user = db_manager.get_user_by_id(stored["user_id"])
+        if not user or not user.get("is_active"):
+            return jsonify({"error": "Usuário inválido", "status": "error"}), 401
+
+        new_hash = generate_password_hash(new_password)
+        ok = db_manager.update_user_password(user["id"], new_hash)
+        if not ok:
+            return jsonify({"error": "Falha ao atualizar a senha", "status": "error"}), 500
+
+        db_manager.mark_reset_token_used(token_hash)
+        db_manager.invalidate_reset_tokens_for_user(user["id"])
+
+        return jsonify({"status": "success", "message": "Senha redefinida com sucesso"}), 200
+    except Exception as e:
+        logger.error(f"❌ Erro no reset-password confirm: {e}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return jsonify({"error": "Erro interno do servidor", "status": "error"}), 500
+
+
+@app.route("/auth/change-password", methods=["POST"])
+@jwt_required
+def auth_change_password():
+    """
+    Permite ao usuário autenticado trocar a própria senha.
+    Requer a senha atual para confirmação.
+    """
+    try:
+        if not db_manager.enabled:
+            return jsonify({"error": "Banco de dados não está habilitado", "status": "error"}), 503
+
+        user_id = request.current_user.get("sub")
+        if not user_id:
+            return jsonify({"error": "Token inválido", "status": "error"}), 401
+
+        data = request.get_json() or {}
+        current_password = data.get("current_password") or ""
+        new_password = data.get("new_password") or ""
+
+        if not current_password or not new_password:
+            return jsonify({"error": "current_password e new_password são obrigatórios", "status": "error"}), 400
+
+        if len(new_password) < 8:
+            return jsonify({"error": "A nova senha deve ter pelo menos 8 caracteres", "status": "error"}), 400
+
+        user = db_manager.get_user_by_id(user_id)
+        if not user or not user.get("is_active"):
+            return jsonify({"error": "Usuário inválido", "status": "error"}), 401
+
+        full_user = db_manager.get_user_by_email(user["email"])
+        if not full_user or not check_password_hash(full_user["password_hash"], current_password):
+            return jsonify({"error": "Senha atual incorreta", "status": "error"}), 401
+
+        new_hash = generate_password_hash(new_password)
+        ok = db_manager.update_user_password(user_id, new_hash)
+        if not ok:
+            return jsonify({"error": "Falha ao atualizar a senha", "status": "error"}), 500
+
+        return jsonify({"status": "success", "message": "Senha alterada com sucesso"}), 200
+    except Exception as e:
+        logger.error(f"❌ Erro no change-password: {e}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return jsonify({"error": "Erro interno do servidor", "status": "error"}), 500
+
 
 # ==================== CONVERSATIONS ENDPOINTS ====================
 

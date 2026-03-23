@@ -215,7 +215,23 @@ class DatabaseManager:
             """
             cursor.execute(create_refresh_tokens_table_query)
             logger.info("Tabela refresh_tokens verificada/criada com sucesso")
-            
+
+            create_password_reset_tokens_table_query = """
+            CREATE TABLE IF NOT EXISTS password_reset_tokens (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                user_id VARCHAR(36) NOT NULL,
+                token_hash CHAR(64) NOT NULL,
+                expires_at TIMESTAMP NOT NULL,
+                used_at TIMESTAMP NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE KEY uq_reset_token_hash (token_hash),
+                INDEX idx_reset_user_id (user_id),
+                INDEX idx_reset_expires_at (expires_at)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+            """
+            cursor.execute(create_password_reset_tokens_table_query)
+            logger.info("Tabela password_reset_tokens verificada/criada com sucesso")
+
             connection.commit()
             cursor.close()
             
@@ -1168,6 +1184,34 @@ class DatabaseManager:
 
         return self._execute_with_fresh_connection(_get_user_by_id_operation)
 
+    def list_users_by_account(self, account_id, limit=50, offset=0):
+        """Lista usuários filtrados por account_id com paginação."""
+        if not self.enabled:
+            return [], 0
+
+        def _list_users_operation(connection):
+            cursor = connection.cursor(dictionary=True)
+
+            count_query = "SELECT COUNT(*) as total FROM users WHERE account_id = %s"
+            cursor.execute(count_query, (account_id,))
+            total = cursor.fetchone()['total']
+
+            query = """
+                SELECT id, account_id, email, full_name, role, is_active,
+                       last_login_at, created_at, updated_at
+                FROM users
+                WHERE account_id = %s
+                ORDER BY created_at DESC
+                LIMIT %s OFFSET %s
+            """
+            cursor.execute(query, (account_id, limit, offset))
+            users = cursor.fetchall()
+            cursor.close()
+            return users, total
+
+        result = self._execute_with_fresh_connection(_list_users_operation)
+        return result if result else ([], 0)
+
     def update_user_last_login(self, user_id):
         if not self.enabled:
             return False
@@ -1237,6 +1281,98 @@ class DatabaseManager:
             return True
 
         result = self._execute_with_fresh_connection(_revoke_refresh_token_operation)
+        return result is not None
+
+    # ==================== PASSWORD RESET ====================
+
+    def store_password_reset_token(self, user_id, token_hash, expires_at):
+        if not self.enabled:
+            return False
+
+        def _store_operation(connection):
+            cursor = connection.cursor()
+            query = """
+                INSERT INTO password_reset_tokens (user_id, token_hash, expires_at)
+                VALUES (%s, %s, %s)
+            """
+            cursor.execute(query, (user_id, token_hash, expires_at))
+            connection.commit()
+            cursor.close()
+            return True
+
+        result = self._execute_with_fresh_connection(_store_operation)
+        return result is not None
+
+    def get_valid_reset_token(self, token_hash):
+        if not self.enabled:
+            return None
+
+        def _get_operation(connection):
+            cursor = connection.cursor(dictionary=True)
+            query = """
+                SELECT id, user_id, token_hash, expires_at, used_at, created_at
+                FROM password_reset_tokens
+                WHERE token_hash = %s AND used_at IS NULL AND expires_at > NOW()
+                LIMIT 1
+            """
+            cursor.execute(query, (token_hash,))
+            row = cursor.fetchone()
+            cursor.close()
+            return row
+
+        return self._execute_with_fresh_connection(_get_operation)
+
+    def mark_reset_token_used(self, token_hash):
+        if not self.enabled:
+            return False
+
+        def _mark_operation(connection):
+            cursor = connection.cursor()
+            query = """
+                UPDATE password_reset_tokens
+                SET used_at = CURRENT_TIMESTAMP
+                WHERE token_hash = %s AND used_at IS NULL
+            """
+            cursor.execute(query, (token_hash,))
+            connection.commit()
+            cursor.close()
+            return True
+
+        result = self._execute_with_fresh_connection(_mark_operation)
+        return result is not None
+
+    def invalidate_reset_tokens_for_user(self, user_id):
+        if not self.enabled:
+            return False
+
+        def _invalidate_operation(connection):
+            cursor = connection.cursor()
+            query = """
+                UPDATE password_reset_tokens
+                SET used_at = CURRENT_TIMESTAMP
+                WHERE user_id = %s AND used_at IS NULL
+            """
+            cursor.execute(query, (user_id,))
+            connection.commit()
+            cursor.close()
+            return True
+
+        result = self._execute_with_fresh_connection(_invalidate_operation)
+        return result is not None
+
+    def update_user_password(self, user_id, password_hash):
+        if not self.enabled:
+            return False
+
+        def _update_operation(connection):
+            cursor = connection.cursor()
+            query = "UPDATE users SET password_hash = %s WHERE id = %s"
+            cursor.execute(query, (password_hash, user_id))
+            connection.commit()
+            cursor.close()
+            return True
+
+        result = self._execute_with_fresh_connection(_update_operation)
         return result is not None
 
     # ==================== CHANNELS CRUD ====================
@@ -2891,6 +3027,70 @@ class DatabaseManager:
             return result
         
         return self._execute_with_fresh_connection(_get_contact_operation)
+
+    def list_conversations_by_account(self, account_id, limit=50, offset=0, status=None):
+        """Lista conversas filtradas por account_id (via contacts) com paginação."""
+        if not self.enabled:
+            return [], 0
+
+        def _list_conversations_operation(connection):
+            cursor = connection.cursor(dictionary=True)
+
+            status_filter = ""
+            params_count = [account_id]
+            params_list = [account_id]
+
+            if status:
+                status_filter = "AND c.status = %s"
+                params_count.append(status)
+                params_list.append(status)
+
+            count_query = f"""
+                SELECT COUNT(*) as total
+                FROM conversation c
+                INNER JOIN contacts ct ON c.contact_id = ct.id
+                WHERE ct.account_id = %s {status_filter}
+            """
+            cursor.execute(count_query, tuple(params_count))
+            total = cursor.fetchone()['total']
+
+            query = f"""
+                SELECT
+                    c.id as conversation_id,
+                    c.contact_id,
+                    c.channel_id,
+                    c.status,
+                    c.status_attendance,
+                    c.started_at,
+                    c.ended_at,
+                    ct.name as contact_name,
+                    ct.whatsapp_phone_number as contact_phone,
+                    ct.email as contact_email,
+                    ch.name as channel_name,
+                    ch.type as channel_type,
+                    (SELECT COUNT(*) FROM conversation_message cm
+                     WHERE cm.conversation_id = c.id) as message_count,
+                    (SELECT cm.message_text FROM conversation_message cm
+                     WHERE cm.conversation_id = c.id
+                     ORDER BY cm.timestamp DESC LIMIT 1) as last_message,
+                    (SELECT cm.timestamp FROM conversation_message cm
+                     WHERE cm.conversation_id = c.id
+                     ORDER BY cm.timestamp DESC LIMIT 1) as last_message_time
+                FROM conversation c
+                INNER JOIN contacts ct ON c.contact_id = ct.id
+                LEFT JOIN channels ch ON c.channel_id = ch.id
+                WHERE ct.account_id = %s {status_filter}
+                ORDER BY COALESCE(c.ended_at, c.started_at) DESC
+                LIMIT %s OFFSET %s
+            """
+            params_list.extend([limit, offset])
+            cursor.execute(query, tuple(params_list))
+            conversations = cursor.fetchall()
+            cursor.close()
+            return conversations, total
+
+        result = self._execute_with_fresh_connection(_list_conversations_operation)
+        return result if result else ([], 0)
 
     def update_conversation_status_attendance(self, conversation_id, status_attendance):
         """Atualiza o status_attendance de uma conversa"""
