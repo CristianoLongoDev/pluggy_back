@@ -340,6 +340,119 @@ def list_users():
         }), 500
 
 
+@app.route('/users', methods=['POST'])
+@jwt_required
+def create_user():
+    """Cria um novo usuário na conta autenticada."""
+    try:
+        if not db_manager.enabled:
+            return jsonify({"error": "Banco de dados não está habilitado", "status": "error"}), 503
+
+        account_id = get_account_id_from_token()
+        if not account_id:
+            return jsonify({"error": "Token JWT não contém account_id válido", "status": "error"}), 400
+
+        data = request.get_json() or {}
+        email = (data.get("email") or "").strip().lower()
+        password = data.get("password") or ""
+        full_name = data.get("full_name")
+        role = data.get("role") or "user"
+        department = data.get("department")
+
+        if not email or not password:
+            return jsonify({"error": "email e password são obrigatórios", "status": "error"}), 400
+
+        existing = db_manager.get_user_by_email(email)
+        if existing:
+            return jsonify({"error": "Usuário já existe com este e-mail", "status": "error"}), 409
+
+        user_id = str(uuid.uuid4())
+        password_hash = generate_password_hash(password)
+        ok = db_manager.insert_user(
+            user_id=user_id,
+            email=email,
+            password_hash=password_hash,
+            account_id=account_id,
+            full_name=full_name,
+            role=role,
+            department=department,
+            is_active=True,
+        )
+        if not ok:
+            return jsonify({"error": "Falha ao criar usuário", "status": "error"}), 500
+
+        logger.info(f"✅ Usuário {user_id} criado na account {account_id}")
+        return jsonify({"status": "success", "user_id": user_id}), 201
+
+    except Exception as e:
+        logger.error(f"❌ Erro no endpoint create_user: {e}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return jsonify({"error": f"Erro interno do servidor: {str(e)}", "status": "error"}), 500
+
+
+@app.route('/users/<user_id>', methods=['PUT'])
+@jwt_required
+def update_user(user_id):
+    """Atualiza dados de um usuário da conta autenticada."""
+    try:
+        if not db_manager.enabled:
+            return jsonify({"error": "Banco de dados não está habilitado", "status": "error"}), 503
+
+        account_id = get_account_id_from_token()
+        if not account_id:
+            return jsonify({"error": "Token JWT não contém account_id válido", "status": "error"}), 400
+
+        data = request.get_json() or {}
+
+        ok = db_manager.update_user(
+            user_id=user_id,
+            account_id=account_id,
+            full_name=data.get("full_name"),
+            role=data.get("role"),
+            department=data.get("department"),
+            is_active=data.get("is_active"),
+        )
+        if not ok:
+            return jsonify({"error": "Usuário não encontrado ou nenhum campo alterado", "status": "error"}), 404
+
+        logger.info(f"✅ Usuário {user_id} atualizado na account {account_id}")
+        return jsonify({"status": "success"}), 200
+
+    except Exception as e:
+        logger.error(f"❌ Erro no endpoint update_user: {e}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return jsonify({"error": f"Erro interno do servidor: {str(e)}", "status": "error"}), 500
+
+
+@app.route('/users/<user_id>', methods=['DELETE'])
+@jwt_required
+def delete_user(user_id):
+    """Remove um usuário da conta autenticada."""
+    try:
+        if not db_manager.enabled:
+            return jsonify({"error": "Banco de dados não está habilitado", "status": "error"}), 503
+
+        account_id = get_account_id_from_token()
+        if not account_id:
+            return jsonify({"error": "Token JWT não contém account_id válido", "status": "error"}), 400
+
+        current_user_id = request.current_user.get("user_id")
+        if current_user_id == user_id:
+            return jsonify({"error": "Não é possível excluir a si mesmo", "status": "error"}), 400
+
+        ok = db_manager.delete_user(user_id=user_id, account_id=account_id)
+        if not ok:
+            return jsonify({"error": "Usuário não encontrado", "status": "error"}), 404
+
+        logger.info(f"✅ Usuário {user_id} removido da account {account_id}")
+        return jsonify({"status": "success"}), 200
+
+    except Exception as e:
+        logger.error(f"❌ Erro no endpoint delete_user: {e}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return jsonify({"error": f"Erro interno do servidor: {str(e)}", "status": "error"}), 500
+
+
 @app.route('/conversations', methods=['GET'])
 @jwt_required
 def list_conversations():

@@ -186,6 +186,7 @@ class DatabaseManager:
                 password_hash VARCHAR(255) NOT NULL,
                 full_name VARCHAR(255) NULL,
                 role VARCHAR(50) NOT NULL DEFAULT 'user',
+                department VARCHAR(100) NULL,
                 is_active TINYINT(1) NOT NULL DEFAULT 1,
                 last_login_at TIMESTAMP NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -197,6 +198,12 @@ class DatabaseManager:
             """
             cursor.execute(create_users_table_query)
             logger.info("Tabela users verificada/criada com sucesso")
+
+            try:
+                cursor.execute("ALTER TABLE users ADD COLUMN department VARCHAR(100) NULL AFTER role")
+                logger.info("Coluna department adicionada à tabela users")
+            except Exception:
+                pass
 
             # Criar tabela refresh_tokens (auth local)
             create_refresh_tokens_table_query = """
@@ -1127,7 +1134,7 @@ class DatabaseManager:
 
     # ==================== AUTH (USERS / REFRESH TOKENS) ====================
 
-    def insert_user(self, user_id, email, password_hash, account_id=None, full_name=None, role="user", is_active=True):
+    def insert_user(self, user_id, email, password_hash, account_id=None, full_name=None, role="user", department=None, is_active=True):
         """Cria usuário local (email/senha)."""
         if not self.enabled:
             return False
@@ -1135,10 +1142,10 @@ class DatabaseManager:
         def _insert_user_operation(connection):
             cursor = connection.cursor()
             query = """
-                INSERT INTO users (id, account_id, email, password_hash, full_name, role, is_active)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                INSERT INTO users (id, account_id, email, password_hash, full_name, role, department, is_active)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             """
-            cursor.execute(query, (user_id, account_id, email, password_hash, full_name, role, 1 if is_active else 0))
+            cursor.execute(query, (user_id, account_id, email, password_hash, full_name, role, department, 1 if is_active else 0))
             connection.commit()
             cursor.close()
             return True
@@ -1153,7 +1160,7 @@ class DatabaseManager:
         def _get_user_by_email_operation(connection):
             cursor = connection.cursor(dictionary=True)
             query = """
-                SELECT id, account_id, email, password_hash, full_name, role, is_active, last_login_at, created_at, updated_at
+                SELECT id, account_id, email, password_hash, full_name, role, department, is_active, last_login_at, created_at, updated_at
                 FROM users
                 WHERE email = %s
                 LIMIT 1
@@ -1172,7 +1179,7 @@ class DatabaseManager:
         def _get_user_by_id_operation(connection):
             cursor = connection.cursor(dictionary=True)
             query = """
-                SELECT id, account_id, email, full_name, role, is_active, last_login_at, created_at, updated_at
+                SELECT id, account_id, email, full_name, role, department, is_active, last_login_at, created_at, updated_at
                 FROM users
                 WHERE id = %s
                 LIMIT 1
@@ -1197,7 +1204,7 @@ class DatabaseManager:
             total = cursor.fetchone()['total']
 
             query = """
-                SELECT id, account_id, email, full_name, role, is_active,
+                SELECT id, account_id, email, full_name, role, department, is_active,
                        last_login_at, created_at, updated_at
                 FROM users
                 WHERE account_id = %s
@@ -1211,6 +1218,58 @@ class DatabaseManager:
 
         result = self._execute_with_fresh_connection(_list_users_operation)
         return result if result else ([], 0)
+
+    def update_user(self, user_id, account_id, full_name=None, role=None, department=None, is_active=None):
+        """Atualiza campos editáveis de um usuário (somente da mesma account)."""
+        if not self.enabled:
+            return False
+
+        def _update_user_operation(connection):
+            sets = []
+            params = []
+            if full_name is not None:
+                sets.append("full_name = %s")
+                params.append(full_name)
+            if role is not None:
+                sets.append("role = %s")
+                params.append(role)
+            if department is not None:
+                sets.append("department = %s")
+                params.append(department)
+            if is_active is not None:
+                sets.append("is_active = %s")
+                params.append(1 if is_active else 0)
+            if not sets:
+                return False
+            sets.append("updated_at = CURRENT_TIMESTAMP")
+            params.extend([user_id, account_id])
+            query = f"UPDATE users SET {', '.join(sets)} WHERE id = %s AND account_id = %s"
+            cursor = connection.cursor()
+            cursor.execute(query, tuple(params))
+            connection.commit()
+            affected = cursor.rowcount
+            cursor.close()
+            return affected > 0
+
+        result = self._execute_with_fresh_connection(_update_user_operation)
+        return result is True
+
+    def delete_user(self, user_id, account_id):
+        """Remove um usuário (somente da mesma account)."""
+        if not self.enabled:
+            return False
+
+        def _delete_user_operation(connection):
+            cursor = connection.cursor()
+            query = "DELETE FROM users WHERE id = %s AND account_id = %s"
+            cursor.execute(query, (user_id, account_id))
+            connection.commit()
+            affected = cursor.rowcount
+            cursor.close()
+            return affected > 0
+
+        result = self._execute_with_fresh_connection(_delete_user_operation)
+        return result is True
 
     def update_user_last_login(self, user_id):
         if not self.enabled:
