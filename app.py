@@ -952,12 +952,12 @@ def get_conversation_messages(conversation_id):
                 "status": "error"
             }), 400
         
-        # Validar formato do UUID da conversa
+        # Validar que conversation_id é um número inteiro válido
         try:
-            uuid.UUID(conversation_id)
-        except ValueError:
+            int(conversation_id)
+        except (ValueError, TypeError):
             return jsonify({
-                "error": "conversation_id deve ser um UUID válido",
+                "error": "conversation_id deve ser um número inteiro válido",
                 "status": "error"
             }), 400
         
@@ -995,16 +995,64 @@ def get_conversation_messages(conversation_id):
                 "status": "error"
             }), 403
         
-        # Buscar mensagens da conversa
-        messages = db_manager.get_conversation_messages(conversation_id, limit)
-        
-        logger.info(f"✅ Usuário {request.current_user.get('sub')} acessou {len(messages)} mensagens da conversa {conversation_id}")
+        # Buscar mensagens da conversa com campos completos
+        def _get_full_messages(connection):
+            cursor = connection.cursor(dictionary=True)
+            query = """
+                SELECT 
+                    cm.id,
+                    cm.conversation_id,
+                    cm.message_text,
+                    cm.sender,
+                    cm.message_type,
+                    cm.timestamp,
+                    cm.tokens,
+                    cm.user_id,
+                    b.name as bot_name,
+                    b.agent_name as bot_agent_name
+                FROM conversation_message cm
+                LEFT JOIN conversation c ON cm.conversation_id = c.id
+                LEFT JOIN channels ch ON c.channel_id = ch.id
+                LEFT JOIN bots b ON ch.bot_id = b.id
+                WHERE cm.conversation_id = %s
+                ORDER BY cm.timestamp ASC
+                LIMIT %s
+            """
+            cursor.execute(query, (conversation_id, limit))
+            rows = cursor.fetchall()
+            cursor.close()
+            return rows
+
+        raw_messages = db_manager._execute_with_fresh_connection(_get_full_messages) or []
+
+        formatted_messages = []
+        for msg in raw_messages:
+            formatted_msg = {
+                "id": str(msg.get("id")),
+                "conversation_id": str(msg.get("conversation_id")),
+                "content": msg.get("message_text", ""),
+                "sender": msg.get("sender", ""),
+                "message_type": msg.get("message_type", "text"),
+                "timestamp": msg["timestamp"].isoformat() if msg.get("timestamp") else None,
+                "tokens": msg.get("tokens"),
+                "user_id": str(msg.get("user_id")) if msg.get("user_id") else None,
+            }
+            if msg.get("bot_name"):
+                formatted_msg["metadata"] = {
+                    "bot": {
+                        "name": msg.get("bot_name"),
+                        "agent_name": msg.get("bot_agent_name")
+                    }
+                }
+            formatted_messages.append(formatted_msg)
+
+        logger.info(f"✅ Usuário {request.current_user.get('sub')} acessou {len(formatted_messages)} mensagens da conversa {conversation_id}")
         
         return jsonify({
             "status": "success",
             "conversation_id": conversation_id,
-            "messages": messages,
-            "total": len(messages),
+            "messages": formatted_messages,
+            "total": len(formatted_messages),
             "limit": limit
         }), 200
         
