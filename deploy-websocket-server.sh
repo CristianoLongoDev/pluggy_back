@@ -112,16 +112,12 @@ spec:
           value: "True"
         - name: JWT_SECRET_KEY
           value: "websocket-default-secret-key-change-in-production"
-        - name: SUPABASE_URL
-          valueFrom:
-            secretKeyRef:
-              name: whatsapp-webhook-secret
-              key: SUPABASE_URL
-        - name: SUPABASE_ANON_KEY
-          valueFrom:
-            secretKeyRef:
-              name: whatsapp-webhook-secret
-              key: SUPABASE_ANON_KEY
+        - name: AUTH_JWT_ISSUER
+          value: "whatsapp-backend"
+        - name: AUTH_JWT_AUDIENCE
+          value: "whatsapp-api"
+        - name: AUTH_ACCEPT_SUPABASE_TOKENS
+          value: "False"
         - name: WEBSOCKET_HOST
           valueFrom:
             configMapKeyRef:

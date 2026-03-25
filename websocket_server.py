@@ -144,7 +144,7 @@ class WebSocketServer:
     
 
     async def authenticate_client(self, token):
-        """Autentica cliente via JWT usando validação do Supabase"""
+        """Autentica cliente via JWT local (HS256)"""
         try:
             if not token:
                 logger.error("❌ Token não fornecido (None ou vazio)")
@@ -154,10 +154,9 @@ class WebSocketServer:
             
             payload = validate_jwt_token(token)
             if payload:
-                # Extrair informações do payload do Supabase
-                user_id = payload.get("sub")  # Supabase usa 'sub' para user ID
+                user_id = payload.get("sub")
                 email = payload.get("email")
-                account_id = payload.get("account_id")  # Usar account_id diretamente do Supabase
+                account_id = payload.get("account_id")
                 
                 if not account_id:
                     logger.warning(f"❌ Account_id não encontrado no JWT para user {user_id}")
